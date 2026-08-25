@@ -1,0 +1,1 @@
+"""Synchronous database infrastructure package."""

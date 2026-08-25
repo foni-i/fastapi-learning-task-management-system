@@ -20,8 +20,11 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-addopts = "-ra --strict-config --strict-markers"
+addopts = "-ra --strict-config --strict-markers -m 'not integration'"
 filterwarnings = ["error"]
+markers = [
+    "integration: requires the dedicated PostgreSQL test service",
+]
 pythonpath = ["."]
 testpaths = ["tests"]
 

@@ -1,8 +1,8 @@
 # FastAPI STMS
 
-FastAPI STMS 是一个分阶段构建的学习项目。当前完成了阶段 1 应用骨架，以及阶段 2 的同步 SQLAlchemy 基础设施、Alembic 环境和 PostgreSQL 开发/测试服务。
+FastAPI STMS 是一个分阶段构建的学习项目。当前完成了阶段 1 应用骨架，以及阶段 2 的同步 SQLAlchemy 基础设施、Alembic 环境、PostgreSQL 开发/测试服务和专用集成测试框架。
 
-目前尚未实现业务数据库表、migration revision、数据库集成测试、认证、用户、项目、任务、readiness 或 CI。不要把当前仓库当作完整的任务管理系统。
+目前尚未实现业务数据库表、migration revision、认证、用户、项目、任务、readiness 或 CI。不要把当前仓库当作完整的任务管理系统。
 
 ## 前置条件
 
@@ -94,6 +94,25 @@ docker compose down
 
 不要为普通停止添加 `--volumes`，否则会删除开发数据库的 named volume。测试数据库使用独立的 `tmpfs`，不会复用或清空开发数据。
 
+### 单独运行 PostgreSQL 集成测试
+
+只启动专用测试数据库，不启动或修改开发数据库：
+
+```powershell
+docker compose up -d --wait postgres-test
+$env:STMS_TEST_DATABASE_URL = "postgresql+psycopg://stms_test:stms_test_local@127.0.0.1:5433/stms_test"
+uv run pytest -m integration tests/integration/test_database_connection.py
+```
+
+集成测试会在建立 Engine 前拒绝缺失、非 `postgresql+psycopg`、非 `*_test`、与 `STMS_DATABASE_URL` 相同、指向 `stms` 或与开发库复用主机端口的 URL。错误信息不会输出完整 URL 或密码。
+
+验证后只停止测试服务；此命令不会停止 `postgres-dev`，也不会删除或修改开发 named volume：
+
+```powershell
+docker compose stop postgres-test
+Remove-Item Env:STMS_TEST_DATABASE_URL
+```
+
 ## 启动应用
 
 ```powershell
@@ -127,11 +146,13 @@ uv run fastapi dev app/main.py
 
 ## 测试和质量检查
 
-运行测试：
+运行普通测试：
 
 ```powershell
 uv run pytest
 ```
+
+pytest 默认排除带有 `integration` marker 的测试，因此普通测试不创建数据库 Engine、不连接 PostgreSQL，也不要求 Docker 正在运行。集成测试必须使用上一节的显式 `-m integration` 命令单独运行。
 
 运行 Ruff 静态检查和格式检查：
 
@@ -186,10 +207,15 @@ FastAPI-STMS/
 |-- tests/
 |   |-- __init__.py
 |   |-- conftest.py
+|   |-- integration/
+|   |   |-- __init__.py
+|   |   |-- conftest.py
+|   |   `-- test_database_connection.py
 |   |-- test_alembic_config.py
 |   |-- test_config.py
 |   |-- test_db_session.py
 |   |-- test_health.py
+|   |-- test_integration_database_safety.py
 |   `-- test_main.py
 |-- alembic.ini
 |-- compose.yaml
@@ -207,6 +233,6 @@ FastAPI-STMS/
 
 ## 当前范围与下一阶段
 
-阶段 1 提供可运行、可测试的应用骨架。阶段 2 当前已提供同步数据库配置、空 metadata、Session 工厂、Alembic 环境，以及相互隔离的 PostgreSQL 开发/测试服务。版本化的 `/api/v1` Router 仍没有产品功能。
+阶段 1 提供可运行、可测试的应用骨架。阶段 2 当前已提供同步数据库配置、空 metadata、Session 工厂、Alembic 环境、相互隔离的 PostgreSQL 服务，以及只连接专用测试库的集成测试框架。版本化的 `/api/v1` Router 仍没有产品功能。
 
-roadmap 的下一项是 **Task 2.5 — Dedicated PostgreSQL integration-test harness**。在项目所有者确认前，不应开始该任务。
+roadmap 的下一项是 **Task 2.6 — Initial baseline migration and round-trip verification**。在项目所有者确认前，不应开始该任务。

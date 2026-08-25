@@ -1,8 +1,8 @@
 # FastAPI STMS
 
-FastAPI STMS 是一个分阶段构建的学习项目。当前只完成了阶段 1：FastAPI 应用骨架、类型化配置、版本化 API Router 骨架、存活检查，以及 pytest、Ruff 和 mypy 质量检查。
+FastAPI STMS 是一个分阶段构建的学习项目。当前完成了阶段 1 应用骨架，以及阶段 2 的同步 SQLAlchemy 基础设施、Alembic 环境和 PostgreSQL 开发/测试服务。
 
-目前尚未实现数据库、迁移、认证、用户、项目、任务、Docker 或 CI。不要把当前仓库当作完整的任务管理系统。
+目前尚未实现业务数据库表、migration revision、数据库集成测试、认证、用户、项目、任务、readiness 或 CI。不要把当前仓库当作完整的任务管理系统。
 
 ## 前置条件
 
@@ -10,8 +10,9 @@ FastAPI STMS 是一个分阶段构建的学习项目。当前只完成了阶段 
 - Windows PowerShell 5.1 或 PowerShell 7+
 - 首次安装工具和依赖时可访问互联网
 - `uv`；项目所需的 Python 3.14 由 `uv` 管理
+- Docker Desktop，并启用 WSL 2 Linux 容器后端
 
-阶段 1 不需要 PostgreSQL 或 Docker。
+运行 FastAPI 骨架本身不需要 PostgreSQL；运行阶段 2 数据库环境需要 Docker Desktop。
 
 ## 安装 uv
 
@@ -58,9 +59,40 @@ Copy-Item .env.example .env
 
 - `.env.example` 只包含安全的示例值，可以提交到 Git。
 - `.env` 属于本机配置，可能含有密钥，绝对不得提交。
-- 当前示例支持运行环境、调试模式和 API 文档开关。
+- 当前示例支持运行环境、调试模式、API 文档开关，以及本地开发/测试 PostgreSQL 服务配置。
 
 没有 `.env` 时，应用也能使用安全的开发默认值启动。
+
+## PostgreSQL 开发与测试环境
+
+`compose.yaml` 使用固定镜像 `postgres:17.6-bookworm`，并把两个数据库放在同一个明确命名的 `fastapi-stms` Compose 项目中：
+
+| 用途 | Service | 主机端口 | 数据库 | 用户 | 数据策略 |
+| --- | --- | --- | --- | --- | --- |
+| 开发 | `postgres-dev` | `5432` | `stms` | `stms_dev` | named volume，停止/重建容器后保留 |
+| 测试 | `postgres-test` | `5433` | `stms_test` | `stms_test` | `tmpfs`，容器移除后丢弃 |
+
+`.env.example` 中的数据库账号和密码只用于本机开发演示，不是生产凭据。若复制为 `.env` 并修改，绝对不要提交 `.env`。
+
+启动并检查两个数据库：
+
+```powershell
+docker compose config
+docker compose up -d postgres-dev postgres-test
+docker compose ps
+docker compose exec postgres-dev pg_isready -U stms_dev -d stms
+docker compose exec postgres-test pg_isready -U stms_test -d stms_test
+```
+
+Compose healthcheck 会在容器内使用实际的 `POSTGRES_USER` 和 `POSTGRES_DB` 调用 `pg_isready`。只有 PostgreSQL 接受连接后，服务状态才会变为 `healthy`。
+
+停止并移除本项目容器和网络，同时保留开发数据 volume：
+
+```powershell
+docker compose down
+```
+
+不要为普通停止添加 `--volumes`，否则会删除开发数据库的 named volume。测试数据库使用独立的 `tmpfs`，不会复用或清空开发数据。
 
 ## 启动应用
 
@@ -111,10 +143,10 @@ uv run ruff format --check .
 运行 mypy 严格类型检查：
 
 ```powershell
-uv run mypy app tests
+uv run mypy app tests alembic
 ```
 
-也可以依次运行以上四条命令，作为阶段 1 的完整质量门禁。
+也可以依次运行以上四条命令，作为当前项目的完整质量门禁。
 
 ## 当前项目结构
 
@@ -133,11 +165,20 @@ FastAPI-STMS/
 |   |-- core/
 |   |   |-- __init__.py
 |   |   `-- config.py
+|   |-- db/
+|   |   |-- __init__.py
+|   |   |-- base.py
+|   |   `-- session.py
 |   |-- schemas/
 |   |   |-- __init__.py
 |   |   `-- health.py
 |   |-- __init__.py
 |   `-- main.py
+|-- alembic/
+|   |-- versions/
+|   |   `-- .gitkeep
+|   |-- env.py
+|   `-- script.py.mako
 |-- docs/
 |   |-- architecture.md
 |   |-- requirements.md
@@ -145,9 +186,13 @@ FastAPI-STMS/
 |-- tests/
 |   |-- __init__.py
 |   |-- conftest.py
+|   |-- test_alembic_config.py
 |   |-- test_config.py
+|   |-- test_db_session.py
 |   |-- test_health.py
 |   `-- test_main.py
+|-- alembic.ini
+|-- compose.yaml
 |-- .env.example
 |-- .gitignore
 |-- .python-version
@@ -162,6 +207,6 @@ FastAPI-STMS/
 
 ## 当前范围与下一阶段
 
-阶段 1 仅提供可运行、可测试、经过静态检查的应用骨架。版本化的 `/api/v1` Router 已挂载，但没有产品功能。
+阶段 1 提供可运行、可测试的应用骨架。阶段 2 当前已提供同步数据库配置、空 metadata、Session 工厂、Alembic 环境，以及相互隔离的 PostgreSQL 开发/测试服务。版本化的 `/api/v1` Router 仍没有产品功能。
 
-roadmap 的下一阶段是 **Stage 2 — PostgreSQL and migrations**，将从建立 SQLAlchemy 2 同步数据库基础设施开始。在项目所有者确认前，不应开始阶段 2。
+roadmap 的下一项是 **Task 2.5 — Dedicated PostgreSQL integration-test harness**。在项目所有者确认前，不应开始该任务。

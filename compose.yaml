@@ -1,0 +1,46 @@
+name: fastapi-stms
+
+services:
+  postgres-dev:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_DB: ${STMS_POSTGRES_DEV_DB:-stms}
+      POSTGRES_USER: ${STMS_POSTGRES_DEV_USER:-stms_dev}
+      POSTGRES_PASSWORD: ${STMS_POSTGRES_DEV_PASSWORD:-stms_dev_local}
+    ports:
+      - "${STMS_POSTGRES_DEV_PORT:-5432}:5432"
+    volumes:
+      - postgres-dev-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    stop_grace_period: 30s
+
+  postgres-test:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_DB: ${STMS_POSTGRES_TEST_DB:-stms_test}
+      POSTGRES_USER: ${STMS_POSTGRES_TEST_USER:-stms_test}
+      POSTGRES_PASSWORD: ${STMS_POSTGRES_TEST_PASSWORD:-stms_test_local}
+    ports:
+      - "${STMS_POSTGRES_TEST_PORT:-5433}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    stop_grace_period: 30s
+
+volumes:
+  postgres-dev-data:
+    name: fastapi-stms-postgres-dev-data

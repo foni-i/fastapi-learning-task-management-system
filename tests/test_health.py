@@ -2,42 +2,38 @@
 
 from fastapi.testclient import TestClient
 
-from app.main import app
 
-
-def test_liveness_endpoint_returns_stable_response_from_application() -> None:
+def test_liveness_endpoint_returns_stable_response_from_application(
+    client: TestClient,
+) -> None:
     """The real application serves the stable liveness response with HTTP 200."""
 
-    with TestClient(app) as client:
-        response = client.get("/health/live")
+    response = client.get("/health/live")
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
 
-def test_liveness_endpoint_rejects_unsupported_method() -> None:
+def test_liveness_endpoint_rejects_unsupported_method(client: TestClient) -> None:
     """The liveness contract only supports GET requests."""
 
-    with TestClient(app) as client:
-        response = client.post("/health/live")
+    response = client.post("/health/live")
 
     assert response.status_code == 405
 
 
-def test_unknown_versioned_path_returns_not_found() -> None:
+def test_unknown_versioned_path_returns_not_found(client: TestClient) -> None:
     """The mounted v1 boundary exposes no product endpoint yet."""
 
-    with TestClient(app) as client:
-        response = client.get("/api/v1/not-yet-implemented")
+    response = client.get("/api/v1/not-yet-implemented")
 
     assert response.status_code == 404
 
 
-def test_liveness_endpoint_is_documented_in_openapi() -> None:
+def test_liveness_endpoint_is_documented_in_openapi(client: TestClient) -> None:
     """OpenAPI exposes the operation and its explicit response schema."""
 
-    with TestClient(app) as client:
-        response = client.get("/openapi.json")
+    response = client.get("/openapi.json")
 
     assert response.status_code == 200
     openapi = response.json()

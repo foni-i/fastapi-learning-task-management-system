@@ -14,6 +14,7 @@ from app.core.config import get_settings
 from app.db import session as db_session
 from app.db.base import Base
 from app.db.session import (
+    DATABASE_CONNECT_TIMEOUT_SECONDS,
     DatabaseConfigurationError,
     get_engine,
     get_session_factory,
@@ -82,6 +83,23 @@ def test_valid_configuration_creates_lazy_synchronous_psycopg_engine(
     assert isinstance(engine, Engine)
     assert engine.url.drivername == "postgresql+psycopg"
     assert engine.dialect.is_async is False
+
+
+def test_engine_configures_a_bounded_connection_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Engine construction passes a short Psycopg connection timeout."""
+
+    configure_database(monkeypatch)
+    engine = Mock(spec=Engine)
+    create_engine = Mock(return_value=engine)
+    monkeypatch.setattr(db_session, "create_engine", create_engine)
+
+    assert get_engine() is engine
+    create_engine.assert_called_once_with(
+        VALID_DATABASE_URL,
+        connect_args={"connect_timeout": DATABASE_CONNECT_TIMEOUT_SECONDS},
+    )
 
 
 def test_session_factory_is_bound_to_configured_engine(

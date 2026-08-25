@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
 
+DATABASE_CONNECT_TIMEOUT_SECONDS = 2
+
 
 class DatabaseConfigurationError(RuntimeError):
     """Raised when database infrastructure is requested without a URL."""
@@ -22,7 +24,10 @@ def get_engine() -> Engine:
     if database_url is None:
         raise DatabaseConfigurationError("STMS_DATABASE_URL is not configured")
 
-    return create_engine(database_url.get_secret_value())
+    return create_engine(
+        database_url.get_secret_value(),
+        connect_args={"connect_timeout": DATABASE_CONNECT_TIMEOUT_SECONDS},
+    )
 
 
 @lru_cache

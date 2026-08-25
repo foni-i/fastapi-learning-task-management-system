@@ -1,8 +1,8 @@
 # FastAPI STMS
 
-FastAPI STMS 是一个分阶段构建的学习项目。当前完成了阶段 1 应用骨架，以及阶段 2 的同步 SQLAlchemy 基础设施、Alembic 环境、PostgreSQL 开发/测试服务和专用集成测试框架。
+FastAPI STMS 是一个分阶段构建的学习项目。当前完成了阶段 1 应用骨架，以及阶段 2 的同步 SQLAlchemy 基础设施、Alembic 环境、PostgreSQL 服务、专用集成测试框架和空 baseline migration。
 
-目前尚未实现业务数据库表、migration revision、认证、用户、项目、任务、readiness 或 CI。不要把当前仓库当作完整的任务管理系统。
+目前尚未实现业务数据库表、认证、用户、项目、任务、readiness 或 CI。不要把当前仓库当作完整的任务管理系统。
 
 ## 前置条件
 
@@ -106,6 +106,28 @@ uv run pytest -m integration tests/integration/test_database_connection.py
 
 集成测试会在建立 Engine 前拒绝缺失、非 `postgresql+psycopg`、非 `*_test`、与 `STMS_DATABASE_URL` 相同、指向 `stms` 或与开发库复用主机端口的 URL。错误信息不会输出完整 URL 或密码。
 
+### Baseline migration 往返验证
+
+迁移往返会改变数据库 revision，只能对可丢弃的 `postgres-test` 执行。严禁把下面的 `STMS_DATABASE_URL` 改为开发数据库或端口 5432：
+
+```powershell
+docker compose up -d --wait postgres-test
+$env:STMS_TEST_DATABASE_URL = "postgresql+psycopg://stms_test:stms_test_local@127.0.0.1:5433/stms_test"
+$env:STMS_DATABASE_URL = $env:STMS_TEST_DATABASE_URL
+
+uv run alembic upgrade head
+uv run alembic current
+uv run python -c "import os; from tests.integration.conftest import validate_migration_test_target; validate_migration_test_target(os.environ.get('STMS_DATABASE_URL')); print('validated dedicated migration test target')"
+uv run alembic downgrade base
+uv run alembic current
+uv run alembic upgrade head
+uv run alembic current
+uv run alembic check
+uv run pytest -m integration tests/integration/test_migrations.py
+```
+
+`downgrade` 可能删除或变更 schema，绝不能在开发或生产数据库上把它当作普通检查运行。上面的 fail-fast 命令必须紧邻 downgrade，并严格验证驱动、本地主机、数据库 `stms_test`、用户 `stms_test` 和主机端口 5433。测试 fixture 在每次自动 downgrade 前也执行相同校验。
+
 验证后只停止测试服务；此命令不会停止 `postgres-dev`，也不会删除或修改开发 named volume：
 
 ```powershell
@@ -197,7 +219,8 @@ FastAPI-STMS/
 |   `-- main.py
 |-- alembic/
 |   |-- versions/
-|   |   `-- .gitkeep
+|   |   |-- .gitkeep
+|   |   `-- 20260825_0001_stage_2_baseline.py
 |   |-- env.py
 |   `-- script.py.mako
 |-- docs/
@@ -210,7 +233,8 @@ FastAPI-STMS/
 |   |-- integration/
 |   |   |-- __init__.py
 |   |   |-- conftest.py
-|   |   `-- test_database_connection.py
+|   |   |-- test_database_connection.py
+|   |   `-- test_migrations.py
 |   |-- test_alembic_config.py
 |   |-- test_config.py
 |   |-- test_db_session.py
@@ -233,6 +257,6 @@ FastAPI-STMS/
 
 ## 当前范围与下一阶段
 
-阶段 1 提供可运行、可测试的应用骨架。阶段 2 当前已提供同步数据库配置、空 metadata、Session 工厂、Alembic 环境、相互隔离的 PostgreSQL 服务，以及只连接专用测试库的集成测试框架。版本化的 `/api/v1` Router 仍没有产品功能。
+阶段 1 提供可运行、可测试的应用骨架。阶段 2 当前已提供同步数据库配置、空 metadata、Session 工厂、Alembic 环境、相互隔离的 PostgreSQL 服务、专用集成测试框架，以及不创建业务表的首个 baseline revision。版本化的 `/api/v1` Router 仍没有产品功能。
 
-roadmap 的下一项是 **Task 2.6 — Initial baseline migration and round-trip verification**。在项目所有者确认前，不应开始该任务。
+roadmap 的下一项是 **Task 2.7 — Database-aware readiness endpoint**。在项目所有者确认前，不应开始该任务。

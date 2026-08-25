@@ -13,6 +13,10 @@ from app.core.config import get_settings
 
 POSTGRESQL_DRIVER = "postgresql+psycopg"
 DEVELOPMENT_DATABASE_NAME = "stms"
+MIGRATION_TEST_DATABASE_NAME = "stms_test"
+MIGRATION_TEST_DATABASE_USER = "stms_test"
+MIGRATION_TEST_HOSTS = frozenset({"127.0.0.1", "localhost"})
+MIGRATION_TEST_HOST_PORT = 5433
 
 
 def validate_test_database_url(
@@ -71,6 +75,23 @@ def validate_test_database_url(
     return test_url
 
 
+def validate_migration_test_target(test_database_url: str | None) -> URL:
+    """Restrict schema-changing tests to the dedicated Compose test service."""
+
+    test_url = validate_test_database_url(test_database_url, None)
+    if (
+        test_url.host not in MIGRATION_TEST_HOSTS
+        or test_url.database != MIGRATION_TEST_DATABASE_NAME
+        or test_url.username != MIGRATION_TEST_DATABASE_USER
+        or test_url.port != MIGRATION_TEST_HOST_PORT
+    ):
+        raise pytest.UsageError(
+            "migration tests require the dedicated stms_test service on port 5433"
+        )
+
+    return test_url
+
+
 @pytest.fixture(scope="session")
 def test_database_url() -> URL:
     """Validate and expose the dedicated URL without displaying its password."""
@@ -96,6 +117,15 @@ def integration_engine(test_database_url: URL) -> Iterator[Engine]:
         yield engine
     finally:
         engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def migration_test_database_url(test_database_url: URL) -> URL:
+    """Revalidate the exact schema-changing target before migration tests."""
+
+    return validate_migration_test_target(
+        test_database_url.render_as_string(hide_password=False)
+    )
 
 
 @pytest.fixture

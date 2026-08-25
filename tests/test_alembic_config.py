@@ -25,6 +25,7 @@ ALEMBIC_CONFIG_PATH = PROJECT_ROOT / "alembic.ini"
 ALEMBIC_DIRECTORY = PROJECT_ROOT / "alembic"
 ALEMBIC_ENV_PATH = ALEMBIC_DIRECTORY / "env.py"
 ALEMBIC_VERSIONS_DIRECTORY = ALEMBIC_DIRECTORY / "versions"
+BASELINE_REVISION = "2f6a8c1d4b90"
 DATABASE_PASSWORD = "test-only-password"
 VALID_DATABASE_URL = (
     f"postgresql+psycopg://test_user:{DATABASE_PASSWORD}@127.0.0.1:5432/test_database"
@@ -73,8 +74,8 @@ def configure_alembic_context(
     monkeypatch.setattr(alembic_context, "run_migrations", lambda: None)
 
 
-def test_alembic_configuration_loads_with_expected_empty_script_location() -> None:
-    """The config resolves its script tree and contains no migration revisions."""
+def test_alembic_configuration_loads_single_empty_baseline() -> None:
+    """The config resolves one root revision without importing product tables."""
 
     configuration = Config(str(ALEMBIC_CONFIG_PATH))
     script_directory = ScriptDirectory.from_config(configuration)
@@ -85,9 +86,12 @@ def test_alembic_configuration_loads_with_expected_empty_script_location() -> No
     assert configuration.get_main_option("sqlalchemy.url") is None
     assert Path(script_directory.dir).resolve() == ALEMBIC_DIRECTORY.resolve()
     assert ALEMBIC_VERSIONS_DIRECTORY.is_dir()
-    assert not list(ALEMBIC_VERSIONS_DIRECTORY.glob("*.py"))
-    assert script_directory.get_heads() == []
-    assert list(script_directory.walk_revisions()) == []
+    revisions = list(script_directory.walk_revisions())
+    assert len(list(ALEMBIC_VERSIONS_DIRECTORY.glob("*.py"))) == 1
+    assert script_directory.get_heads() == [BASELINE_REVISION]
+    assert len(revisions) == 1
+    assert revisions[0].revision == BASELINE_REVISION
+    assert revisions[0].down_revision is None
 
 
 def test_alembic_config_contains_no_database_url_or_password() -> None:

@@ -1,0 +1,1 @@
+"""FastAPI STMS application package."""

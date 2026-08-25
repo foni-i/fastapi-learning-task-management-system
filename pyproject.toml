@@ -8,6 +8,7 @@ dependencies = [
     "pydantic-settings",
     "psycopg[binary]>=3.2,<4.0",
     "sqlalchemy>=2.0,<3.0",
+    "alembic>=1.17,<2.0",
 ]
 
 [dependency-groups]

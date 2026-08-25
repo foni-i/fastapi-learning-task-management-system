@@ -1,8 +1,8 @@
 # FastAPI STMS
 
-FastAPI STMS 是一个分阶段构建的学习项目。当前完成了阶段 1 应用骨架，以及阶段 2 的同步 SQLAlchemy 基础设施、Alembic 环境、PostgreSQL 服务、专用集成测试框架和空 baseline migration。
+FastAPI STMS 是一个分阶段构建的学习项目。当前完成了阶段 1 应用骨架，以及阶段 2 的同步 SQLAlchemy 基础设施、Alembic 环境、相互隔离的 PostgreSQL 服务、专用集成测试框架、空 baseline migration 和数据库 readiness 检查。
 
-目前尚未实现业务数据库表、认证、用户、项目、任务、readiness 或 CI。不要把当前仓库当作完整的任务管理系统。
+目前尚未实现任何业务数据库表、认证、用户、项目、任务或 CI。不要把当前仓库当作完整的任务管理系统。
 
 ## 前置条件
 
@@ -60,8 +60,19 @@ Copy-Item .env.example .env
 - `.env.example` 只包含安全的示例值，可以提交到 Git。
 - `.env` 属于本机配置，可能含有密钥，绝对不得提交。
 - 当前示例支持运行环境、调试模式、API 文档开关，以及本地开发/测试 PostgreSQL 服务配置。
+- 数据库 URL 和密码只能来自环境变量或未提交的 `.env`；不要放入 README、`alembic.ini`、源码、日志或测试输出。
+- `STMS_DATABASE_URL` 是应用和 Alembic 使用的数据库 URL；`STMS_TEST_DATABASE_URL` 只允许 integration 测试使用专用测试库。
 
 没有 `.env` 时，应用也能使用安全的开发默认值启动。
+
+## SQLAlchemy 数据库基础设施
+
+阶段 2 使用 SQLAlchemy 2 同步 API，各组件职责如下：
+
+- `Base`（`app/db/base.py`）只提供共享的 declarative metadata。目前 metadata 为空，不包含用户、认证、项目、任务或其他业务表。
+- `Engine`（`app/db/session.py`）管理连接池和数据库方言。它按进程缓存、同步运行，并配置有限的连接超时；创建 Engine 不会立即连接，首次 `connect()` 或 Session 执行 SQL 时才访问 PostgreSQL。
+- `sessionmaker` 绑定上述 Engine，用于创建短生命周期的同步 `Session`。`get_session()` 每次 yield 一个 Session，并在 `finally` 中关闭；它不会隐藏 `commit`，未来的写入 use case 必须自行拥有提交/回滚边界。
+- readiness 探针使用短生命周期 `Connection` 执行 `SELECT 1`，通过上下文管理器在成功或查询异常时归还连接池。它不创建 Session，也不修改数据。
 
 ## PostgreSQL 开发与测试环境
 
@@ -86,6 +97,8 @@ docker compose exec postgres-test pg_isready -U stms_test -d stms_test
 
 Compose healthcheck 会在容器内使用实际的 `POSTGRES_USER` 和 `POSTGRES_DB` 调用 `pg_isready`。只有 PostgreSQL 接受连接后，服务状态才会变为 `healthy`。
 
+开发库和测试库通过四层隔离避免误用：不同的 Compose service、不同主机端口、不同数据库/用户，以及不同存储。开发库使用 `fastapi-stms-postgres-dev-data` named volume；测试库使用容器内 `tmpfs`，重建测试容器不会清空开发 volume。integration 安全守卫还会拒绝开发库名称、端口复用、非 `*_test` 数据库和非 PostgreSQL URL。
+
 停止并移除本项目容器和网络，同时保留开发数据 volume：
 
 ```powershell
@@ -100,8 +113,8 @@ docker compose down
 
 ```powershell
 docker compose up -d --wait postgres-test
-$env:STMS_TEST_DATABASE_URL = "postgresql+psycopg://stms_test:stms_test_local@127.0.0.1:5433/stms_test"
-uv run pytest -m integration tests/integration/test_database_connection.py
+$env:STMS_TEST_DATABASE_URL = "<dedicated-test-url-from-uncommitted-.env>"
+uv run pytest -m integration
 ```
 
 集成测试会在建立 Engine 前拒绝缺失、非 `postgresql+psycopg`、非 `*_test`、与 `STMS_DATABASE_URL` 相同、指向 `stms` 或与开发库复用主机端口的 URL。错误信息不会输出完整 URL 或密码。
@@ -111,8 +124,10 @@ uv run pytest -m integration tests/integration/test_database_connection.py
 迁移往返会改变数据库 revision，只能对可丢弃的 `postgres-test` 执行。严禁把下面的 `STMS_DATABASE_URL` 改为开发数据库或端口 5432：
 
 ```powershell
+docker compose stop postgres-test
+docker compose rm -f postgres-test
 docker compose up -d --wait postgres-test
-$env:STMS_TEST_DATABASE_URL = "postgresql+psycopg://stms_test:stms_test_local@127.0.0.1:5433/stms_test"
+$env:STMS_TEST_DATABASE_URL = "<dedicated-test-url-from-uncommitted-.env>"
 $env:STMS_DATABASE_URL = $env:STMS_TEST_DATABASE_URL
 
 uv run alembic upgrade head
@@ -132,7 +147,8 @@ uv run pytest -m integration tests/integration/test_migrations.py
 
 ```powershell
 docker compose stop postgres-test
-Remove-Item Env:STMS_TEST_DATABASE_URL
+Remove-Item Env:STMS_DATABASE_URL -ErrorAction SilentlyContinue
+Remove-Item Env:STMS_TEST_DATABASE_URL -ErrorAction SilentlyContinue
 ```
 
 ## 启动应用
@@ -158,6 +174,38 @@ uv run fastapi dev app/main.py
 ```
 
 `/health/live` 只表示 FastAPI 应用进程正在响应，不检查数据库或其他外部依赖。
+
+### 就绪检查
+
+`/health/ready` 会在收到请求时使用同步 SQLAlchemy Connection 执行轻量 `SELECT 1`：
+
+- PostgreSQL 可回答时返回 HTTP 200 和 `{"status":"ok"}`。
+- 数据库 URL 缺失、连接失败或查询失败时返回 HTTP 503 和 `{"status":"unavailable"}`。
+- 503 响应不会包含完整数据库 URL、密码、驱动异常或堆栈。
+- 应用导入和启动不会执行探针；`/health/live` 也永远不会访问数据库。
+
+使用专用测试库手动观察真实状态转换：
+
+```powershell
+docker compose up -d --wait postgres-test
+$env:STMS_DATABASE_URL = "<dedicated-test-url-from-uncommitted-.env>"
+uv run fastapi dev app/main.py
+```
+
+保持应用终端运行，在第二个 PowerShell 中依次请求 health endpoint、只停止测试库、再次请求，然后恢复测试库：
+
+```powershell
+curl.exe -i http://127.0.0.1:8000/health/live
+curl.exe -i http://127.0.0.1:8000/health/ready
+docker compose stop postgres-test
+curl.exe -i http://127.0.0.1:8000/health/live
+curl.exe -i http://127.0.0.1:8000/health/ready
+docker compose start postgres-test
+docker compose up -d --wait postgres-test
+curl.exe -i http://127.0.0.1:8000/health/ready
+```
+
+预期 readiness 为 `200 -> 503 -> 200`，liveness 在数据库可用和不可用时均为 200。完成后按 `Ctrl+C` 停止应用，并执行 `docker compose stop postgres-test`。
 
 ### OpenAPI 文档
 
@@ -189,7 +237,27 @@ uv run ruff format --check .
 uv run mypy app tests alembic
 ```
 
-也可以依次运行以上四条命令，作为当前项目的完整质量门禁。
+检查依赖锁和 Git diff：
+
+```powershell
+uv lock --check
+git diff --check
+```
+
+阶段 2 的完整质量门禁是普通 pytest、显式 PostgreSQL integration pytest、Ruff lint、Ruff format、mypy、lock check 和 diff check。SQLite 不作为 PostgreSQL integration 行为的替代品。
+
+## Stage 2 最终验证顺序
+
+下面的流程只操作本项目 Compose 服务。测试库迁移往返前应重建 `postgres-test`，以获得空的 `tmpfs`；不得重建 `postgres-dev` 或删除开发 named volume。
+
+1. 运行 `docker version`、`docker compose version` 和 `docker compose config --quiet`。
+2. 运行 `docker compose up -d --wait postgres-dev postgres-test`，确认两个服务均为 `healthy`。
+3. 分别通过同步 Psycopg 对开发库和测试库执行 `SELECT 1`，并核对数据库名、当前用户和服务端口。
+4. 只重建 `postgres-test`，对空测试库执行 baseline `upgrade head -> downgrade base -> upgrade head`，再运行 `alembic current` 和 `alembic check`。
+5. 验证 readiness `200 -> 503 -> 200`，同时确认 liveness 始终为 200。
+6. 在不设置数据库环境变量的进程中运行普通 `uv run pytest`，再对专用测试库运行 `uv run pytest -m integration`。
+7. 运行全部质量门，审查 Git diff 和迁移漂移。
+8. 运行 `docker compose down` 停止并移除本项目容器和网络；不要添加 `--volumes`。随后用 `docker volume inspect fastapi-stms-postgres-dev-data` 确认开发 named volume 仍存在。
 
 ## 当前项目结构
 
@@ -211,6 +279,7 @@ FastAPI-STMS/
 |   |-- db/
 |   |   |-- __init__.py
 |   |   |-- base.py
+|   |   |-- probe.py
 |   |   `-- session.py
 |   |-- schemas/
 |   |   |-- __init__.py
@@ -234,7 +303,8 @@ FastAPI-STMS/
 |   |   |-- __init__.py
 |   |   |-- conftest.py
 |   |   |-- test_database_connection.py
-|   |   `-- test_migrations.py
+|   |   |-- test_migrations.py
+|   |   `-- test_readiness.py
 |   |-- test_alembic_config.py
 |   |-- test_config.py
 |   |-- test_db_session.py
@@ -257,6 +327,6 @@ FastAPI-STMS/
 
 ## 当前范围与下一阶段
 
-阶段 1 提供可运行、可测试的应用骨架。阶段 2 当前已提供同步数据库配置、空 metadata、Session 工厂、Alembic 环境、相互隔离的 PostgreSQL 服务、专用集成测试框架，以及不创建业务表的首个 baseline revision。版本化的 `/api/v1` Router 仍没有产品功能。
+阶段 1 提供可运行、可测试的应用骨架。阶段 2 已提供同步数据库配置、空 metadata、Session 工厂、Alembic 环境、相互隔离的 PostgreSQL 服务、专用集成测试框架、不创建业务表的 baseline revision，以及数据库感知的 readiness。版本化的 `/api/v1` Router 仍没有产品功能。
 
-roadmap 的下一项是 **Task 2.7 — Database-aware readiness endpoint**。在项目所有者确认前，不应开始该任务。
+下一阶段是 **Stage 3 — Registration**。建议第一项 1–2 小时任务只实现用户 ORM 模型及对应 Alembic migration，并验证邮箱规范化/唯一约束和迁移往返；在项目所有者确认 Stage 2 前不得开始。

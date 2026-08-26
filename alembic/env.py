@@ -7,15 +7,15 @@ from sqlalchemy import create_engine, pool
 
 from alembic import context
 from app.core.config import get_settings
-from app.db.base import Base
 from app.db.session import DatabaseConfigurationError
+from app.models import User
 
 config: Config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
-target_metadata = Base.metadata
+target_metadata = User.metadata
 
 
 def get_database_url() -> str:

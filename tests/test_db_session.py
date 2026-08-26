@@ -64,11 +64,10 @@ def configure_database(monkeypatch: pytest.MonkeyPatch) -> None:
     get_settings.cache_clear()
 
 
-def test_base_exposes_empty_metadata_without_business_tables() -> None:
-    """The SQLAlchemy 2 base is ready but contains no premature product models."""
+def test_base_exposes_shared_metadata_without_import_side_effects() -> None:
+    """The SQLAlchemy 2 base remains usable without creating a connection."""
 
     assert Base.metadata is not None
-    assert not Base.metadata.tables
 
 
 def test_valid_configuration_creates_lazy_synchronous_psycopg_engine(

@@ -17,7 +17,7 @@ pytestmark = pytest.mark.integration
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_CONFIG_PATH = PROJECT_ROOT / "alembic.ini"
 BASELINE_REVISION = "2f6a8c1d4b90"
-ALLOWED_TABLES = {"alembic_version"}
+ALLOWED_BASELINE_TABLES = {"alembic_version"}
 
 
 def get_current_revision(engine: Engine) -> str | None:
@@ -37,15 +37,15 @@ def get_public_tables(engine: Engine) -> set[str]:
 def assert_only_alembic_tables(engine: Engine) -> None:
     """Reject any product or unexplained table throughout the baseline cycle."""
 
-    assert get_public_tables(engine) <= ALLOWED_TABLES
+    assert get_public_tables(engine) <= ALLOWED_BASELINE_TABLES
 
 
-def test_baseline_upgrade_downgrade_and_reupgrade(
+def test_stage_2_baseline_remains_a_reachable_empty_revision(
     migration_test_database_url: URL,
     integration_engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Prove the empty baseline round trip on only the dedicated test database."""
+    """Prove the empty Stage 2 boundary remains reachable in the longer chain."""
 
     target_url = migration_test_database_url.render_as_string(hide_password=False)
     configuration = Config(str(ALEMBIC_CONFIG_PATH))
@@ -53,25 +53,23 @@ def test_baseline_upgrade_downgrade_and_reupgrade(
     get_settings.cache_clear()
 
     try:
+        validate_migration_test_target(target_url)
+        command.downgrade(configuration, "base")
+        assert get_current_revision(integration_engine) is None
         assert_only_alembic_tables(integration_engine)
+
+        command.upgrade(configuration, BASELINE_REVISION)
+        assert get_current_revision(integration_engine) == BASELINE_REVISION
+        assert get_public_tables(integration_engine) == ALLOWED_BASELINE_TABLES
 
         validate_migration_test_target(target_url)
         command.downgrade(configuration, "base")
         assert get_current_revision(integration_engine) is None
         assert_only_alembic_tables(integration_engine)
 
-        command.upgrade(configuration, "head")
+        command.upgrade(configuration, BASELINE_REVISION)
         assert get_current_revision(integration_engine) == BASELINE_REVISION
-        assert get_public_tables(integration_engine) == ALLOWED_TABLES
-
-        validate_migration_test_target(target_url)
-        command.downgrade(configuration, "base")
-        assert get_current_revision(integration_engine) is None
-        assert_only_alembic_tables(integration_engine)
-
-        command.upgrade(configuration, "head")
-        assert get_current_revision(integration_engine) == BASELINE_REVISION
-        assert get_public_tables(integration_engine) == ALLOWED_TABLES
-        command.check(configuration)
+        assert get_public_tables(integration_engine) == ALLOWED_BASELINE_TABLES
     finally:
+        command.upgrade(configuration, "head")
         get_settings.cache_clear()

@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, String, text
+from sqlalchemy import DateTime, String, UniqueConstraint, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -14,6 +14,7 @@ class User(Base):
     """Persist the five foundational user fields without registration behavior."""
 
     __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("email", name="uq_users_email"),)
 
     id: Mapped[UUID] = mapped_column(
         postgresql.UUID(as_uuid=True),

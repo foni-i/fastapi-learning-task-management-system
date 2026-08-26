@@ -35,7 +35,7 @@ def get_current_revision(engine: Engine) -> str | None:
 
 
 def assert_users_table_contract(engine: Engine) -> None:
-    """Inspect exact columns and prove Task 3.2 uniqueness is still absent."""
+    """Inspect the Task 3.1 table exactly at its own revision boundary."""
 
     inspector = inspect(engine)
     assert set(inspector.get_table_names(schema="public")) == {
@@ -91,7 +91,7 @@ def test_user_migration_upgrade_downgrade_and_reupgrade(
             schema="public"
         )
 
-        command.upgrade(configuration, "head")
+        command.upgrade(configuration, USER_REVISION)
         assert get_current_revision(integration_engine) == USER_REVISION
         assert_users_table_contract(integration_engine)
 
@@ -102,10 +102,9 @@ def test_user_migration_upgrade_downgrade_and_reupgrade(
             schema="public"
         )
 
-        command.upgrade(configuration, "head")
+        command.upgrade(configuration, USER_REVISION)
         assert get_current_revision(integration_engine) == USER_REVISION
         assert_users_table_contract(integration_engine)
-        command.check(configuration)
     finally:
         command.upgrade(configuration, "head")
         get_settings.cache_clear()

@@ -28,6 +28,7 @@ ALEMBIC_ENV_PATH = ALEMBIC_DIRECTORY / "env.py"
 ALEMBIC_VERSIONS_DIRECTORY = ALEMBIC_DIRECTORY / "versions"
 BASELINE_REVISION = "2f6a8c1d4b90"
 USER_REVISION = "7c9e1b4a6d32"
+EMAIL_UNIQUE_REVISION = "9f3b2d6e8a41"
 DATABASE_PASSWORD = "test-only-password"
 VALID_DATABASE_URL = (
     f"postgresql+psycopg://test_user:{DATABASE_PASSWORD}@127.0.0.1:5432/test_database"
@@ -77,7 +78,7 @@ def configure_alembic_context(
 
 
 def test_alembic_configuration_loads_linear_user_migration_chain() -> None:
-    """The config resolves the Stage 2 baseline followed by the users revision."""
+    """Resolve baseline, users table, then canonical-email uniqueness."""
 
     configuration = Config(str(ALEMBIC_CONFIG_PATH))
     script_directory = ScriptDirectory.from_config(configuration)
@@ -89,13 +90,15 @@ def test_alembic_configuration_loads_linear_user_migration_chain() -> None:
     assert Path(script_directory.dir).resolve() == ALEMBIC_DIRECTORY.resolve()
     assert ALEMBIC_VERSIONS_DIRECTORY.is_dir()
     revisions = list(script_directory.walk_revisions())
-    assert len(list(ALEMBIC_VERSIONS_DIRECTORY.glob("*.py"))) == 2
-    assert script_directory.get_heads() == [USER_REVISION]
-    assert len(revisions) == 2
-    assert revisions[0].revision == USER_REVISION
-    assert revisions[0].down_revision == BASELINE_REVISION
-    assert revisions[1].revision == BASELINE_REVISION
-    assert revisions[1].down_revision is None
+    assert len(list(ALEMBIC_VERSIONS_DIRECTORY.glob("*.py"))) == 3
+    assert script_directory.get_heads() == [EMAIL_UNIQUE_REVISION]
+    assert len(revisions) == 3
+    assert revisions[0].revision == EMAIL_UNIQUE_REVISION
+    assert revisions[0].down_revision == USER_REVISION
+    assert revisions[1].revision == USER_REVISION
+    assert revisions[1].down_revision == BASELINE_REVISION
+    assert revisions[2].revision == BASELINE_REVISION
+    assert revisions[2].down_revision is None
 
 
 def test_alembic_config_contains_no_database_url_or_password() -> None:

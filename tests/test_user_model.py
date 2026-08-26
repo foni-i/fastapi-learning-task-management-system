@@ -58,12 +58,17 @@ def test_user_columns_have_exact_types_bounds_and_defaults() -> None:
         assert str(timestamp.server_default.arg) == "CURRENT_TIMESTAMP"
 
 
-def test_user_email_has_no_unique_constraint_or_index_yet() -> None:
-    """Defer every email uniqueness mechanism to Task 3.2."""
+def test_user_email_has_named_unique_constraint_without_index() -> None:
+    """Expose the named final defense for canonical email values in metadata."""
 
     table = cast(Table, User.__table__)
+    unique_constraints = {
+        constraint.name: tuple(column.name for column in constraint.columns)
+        for constraint in table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
 
     assert table.c.email.unique in (None, False)
     assert table.c.email.index in (None, False)
-    assert not any(isinstance(item, UniqueConstraint) for item in table.constraints)
+    assert unique_constraints == {"uq_users_email": ("email",)}
     assert not table.indexes

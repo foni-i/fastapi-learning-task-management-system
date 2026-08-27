@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
 
 from app.core.email_normalization import normalize_email
+from app.core.security import validate_password
 
 TIMEZONE_ERROR_MESSAGE = "Timestamp must include timezone information"
 
@@ -24,6 +25,14 @@ class UserRegistrationRequest(BaseModel):
         """Store the shared canonical email representation in the schema."""
 
         return normalize_email(value)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_value(cls, value: SecretStr) -> SecretStr:
+        """Enforce the shared policy without replacing or exposing the secret."""
+
+        validate_password(value.get_secret_value())
+        return value
 
 
 class PublicUser(BaseModel):

@@ -109,17 +109,6 @@ def test_registration_password_is_secret_aware_and_preserved_exactly() -> None:
     assert "**********" in request.model_dump_json()
 
 
-@pytest.mark.parametrize("password", ["x" * 11, "x" * 129])
-def test_registration_schema_defers_password_length_policy(password: str) -> None:
-    """Prove the 12-128 policy has not been implemented before Task 3.4."""
-
-    request = UserRegistrationRequest.model_validate(
-        {"email": "user@example.com", "password": password}
-    )
-
-    assert request.password.get_secret_value() == password
-
-
 def test_public_user_has_exact_typed_field_contract() -> None:
     """Keep UUID and the four-field public response allowlist explicit."""
 

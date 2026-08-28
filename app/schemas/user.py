@@ -35,6 +35,14 @@ class UserRegistrationRequest(BaseModel):
         return value
 
 
+class RegistrationConflictResponse(BaseModel):
+    """Document the minimal route-local duplicate registration response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    detail: str
+
+
 class PublicUser(BaseModel):
     """Expose the explicit public allowlist for a persisted user."""
 

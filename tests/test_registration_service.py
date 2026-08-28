@@ -4,12 +4,14 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import NoReturn, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.exceptions import DUPLICATE_EMAIL_MESSAGE, DuplicateEmailError
 from app.repositories.users import UserRepository
 from app.schemas.user import PublicUser, UserRegistrationRequest
 from app.services.registration import register_user
@@ -23,12 +25,21 @@ class ControlledRepository:
         events: list[str],
         user: SimpleNamespace,
         failure: Exception | None = None,
+        existing_user: SimpleNamespace | None = None,
     ) -> None:
         self.events = events
         self.user = user
         self.failure = failure
+        self.existing_user = existing_user
         self.received_email: str | None = None
         self.received_hash: str | None = None
+
+    def get_by_email(self, email: str) -> SimpleNamespace | None:
+        """Record the exact lookup that must precede hashing."""
+
+        self.events.append("repository.get_by_email")
+        self.received_email = email
+        return self.existing_user
 
     def create(self, *, email: str, password_hash: str) -> SimpleNamespace:
         """Capture only canonical email and non-plaintext hash material."""
@@ -41,6 +52,14 @@ class ControlledRepository:
         self.user.email = email
         self.user.password_hash = password_hash
         return self.user
+
+
+class ControlledDatabaseError(Exception):
+    """Provide the minimal Psycopg diagnostic shape expected by the service."""
+
+    def __init__(self, constraint_name: str) -> None:
+        super().__init__("controlled database failure")
+        self.diag = SimpleNamespace(constraint_name=constraint_name)
 
 
 def make_registration() -> UserRegistrationRequest:
@@ -107,9 +126,10 @@ def test_registration_coordinates_security_persistence_and_commit_in_order() -> 
 
     assert events == [
         "normalize",
+        "repository.factory",
+        "repository.get_by_email",
         "policy",
         "hash",
-        "repository.factory",
         "repository.create",
         "commit",
     ]
@@ -180,3 +200,87 @@ def test_repository_never_receives_the_plaintext_password() -> None:
     assert repository.received_hash == generated_hash
     assert result.model_dump().keys() == {"id", "email", "created_at", "updated_at"}
     assert generated_hash not in result.model_dump_json()
+
+
+def make_integrity_error(constraint_name: str) -> IntegrityError:
+    """Build a driver-shaped error without exposing its diagnostics to callers."""
+
+    original = ControlledDatabaseError(constraint_name)
+    return IntegrityError("controlled statement", {}, original)
+
+
+def test_early_duplicate_is_detected_before_hashing_and_rolled_back() -> None:
+    """Avoid expensive secret work while preserving service transaction ownership."""
+
+    events: list[str] = []
+    registration = make_registration()
+    session = MagicMock(spec=Session)
+    hasher = Mock()
+    repository = ControlledRepository(
+        events,
+        make_user(),
+        existing_user=make_user(),
+    )
+
+    with pytest.raises(DuplicateEmailError) as exc_info:
+        register_user(
+            registration,
+            session,
+            password_hasher=hasher,
+            repository_factory=lambda _session: cast(UserRepository, repository),
+        )
+
+    assert str(exc_info.value) == DUPLICATE_EMAIL_MESSAGE
+    assert events == ["repository.get_by_email"]
+    hasher.assert_not_called()
+    assert repository.received_hash is None
+    session.commit.assert_not_called()
+    session.rollback.assert_called_once_with()
+
+
+@pytest.mark.parametrize("failure_stage", ["flush", "commit"])
+def test_named_email_constraint_is_translated_after_rollback(
+    failure_stage: str,
+) -> None:
+    """Map only the named final database defense to the duplicate domain error."""
+
+    registration = make_registration()
+    session = MagicMock(spec=Session)
+    failure = make_integrity_error("uq_users_email")
+    repository = ControlledRepository(
+        [],
+        make_user(),
+        failure if failure_stage == "flush" else None,
+    )
+    if failure_stage == "commit":
+        session.commit.side_effect = failure
+
+    with pytest.raises(DuplicateEmailError) as exc_info:
+        register_user(
+            registration,
+            session,
+            repository_factory=lambda _session: cast(UserRepository, repository),
+        )
+
+    assert str(exc_info.value) == DUPLICATE_EMAIL_MESSAGE
+    assert "controlled statement" not in str(exc_info.value)
+    session.rollback.assert_called_once_with()
+
+
+def test_unrelated_integrity_error_is_rolled_back_and_reraised() -> None:
+    """Never mislabel another database invariant as a duplicate email."""
+
+    registration = make_registration()
+    session = MagicMock(spec=Session)
+    failure = make_integrity_error("some_other_constraint")
+    repository = ControlledRepository([], make_user(), failure)
+
+    with pytest.raises(IntegrityError) as exc_info:
+        register_user(
+            registration,
+            session,
+            repository_factory=lambda _session: cast(UserRepository, repository),
+        )
+
+    assert exc_info.value is failure
+    session.rollback.assert_called_once_with()

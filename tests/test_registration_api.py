@@ -109,6 +109,30 @@ def test_registration_validation_failure_does_not_call_service(
     assert lifecycle == ["opened", "closed"]
 
 
+def test_registration_password_validation_masks_secret_input(
+    client: TestClient,
+    registration_session: tuple[MagicMock, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep rejected plaintext out of FastAPI's standard 422 detail items."""
+
+    _session, lifecycle = registration_session
+    service = Mock()
+    rejected_password = "short value"
+    monkeypatch.setattr(auth, "register_user", service)
+
+    response = client.post(
+        "/api/v1/auth/register",
+        json={"email": "user@example.com", "password": rejected_password},
+    )
+
+    assert response.status_code == 422
+    assert rejected_password not in response.text
+    assert response.json()["detail"][0]["input"] == "**********"
+    service.assert_not_called()
+    assert lifecycle == ["opened", "closed"]
+
+
 def test_registration_service_error_still_closes_session_dependency(
     client: TestClient,
     registration_session: tuple[MagicMock, list[str]],

@@ -81,7 +81,7 @@ Copy-Item .env.example .env
 | 用途 | Service | 主机端口 | 数据库 | 用户 | 数据策略 |
 | --- | --- | --- | --- | --- | --- |
 | 开发 | `postgres-dev` | `5432` | `stms` | `stms_dev` | named volume，停止/重建容器后保留 |
-| 测试 | `postgres-test` | `5433` | `stms_test` | `stms_test` | `tmpfs`，容器移除后丢弃 |
+| 测试 | `postgres-test` | 默认 `5433` | `stms_test` | `stms_test` | `tmpfs`，容器移除后丢弃 |
 
 `.env.example` 中的数据库账号和密码只用于本机开发演示，不是生产凭据。若复制为 `.env` 并修改，绝对不要提交 `.env`。
 
@@ -119,6 +119,8 @@ uv run pytest -m integration
 
 集成测试会在建立 Engine 前拒绝缺失、非 `postgresql+psycopg`、非 `*_test`、与 `STMS_DATABASE_URL` 相同、指向 `stms` 或与开发库复用主机端口的 URL。错误信息不会输出完整 URL 或密码。
 
+若 Windows 把默认 `5433` 放入 TCP 排除范围，可只在当前 shell 或未提交的 `.env` 中把 `STMS_POSTGRES_TEST_PORT` 设为一个专用空闲端口，并让 `STMS_TEST_DATABASE_URL` 使用同一端口。Compose、连接测试和迁移安全守卫会拒绝端口不一致；不要为此修改 Windows 保留端口，也不要复用开发端口 `5432`。
+
 ### Baseline migration 往返验证
 
 迁移往返会改变数据库 revision，只能对可丢弃的 `postgres-test` 执行。严禁把下面的 `STMS_DATABASE_URL` 改为开发数据库或端口 5432：
@@ -141,7 +143,7 @@ uv run alembic check
 uv run pytest -m integration tests/integration/test_migrations.py
 ```
 
-`downgrade` 可能删除或变更 schema，绝不能在开发或生产数据库上把它当作普通检查运行。上面的 fail-fast 命令必须紧邻 downgrade，并严格验证驱动、本地主机、数据库 `stms_test`、用户 `stms_test` 和主机端口 5433。测试 fixture 在每次自动 downgrade 前也执行相同校验。
+`downgrade` 可能删除或变更 schema，绝不能在开发或生产数据库上把它当作普通检查运行。上面的 fail-fast 命令必须紧邻 downgrade，并严格验证驱动、本地主机、数据库 `stms_test`、用户 `stms_test`，以及 URL 与 `STMS_POSTGRES_TEST_PORT` 选择的主机端口一致；未显式配置时默认端口为 `5433`。测试 fixture 在每次自动 downgrade 前也执行相同校验。
 
 验证后只停止测试服务；此命令不会停止 `postgres-dev`，也不会删除或修改开发 named volume：
 

@@ -1,9 +1,47 @@
 """FastAPI application entry point."""
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from app.api.router import router as root_router
 from app.core.config import Settings, get_settings
+
+MASKED_SECRET = "**********"
+
+
+def _safe_validation_errors(
+    exception: RequestValidationError,
+) -> list[dict[str, object]]:
+    """Preserve FastAPI's error shape while masking password inputs."""
+
+    safe_errors: list[dict[str, object]] = []
+    for error in exception.errors():
+        safe_error: dict[str, object] = dict(error)
+        location = safe_error.get("loc")
+        input_value = safe_error.get("input")
+        if isinstance(location, tuple) and "password" in location:
+            safe_error["input"] = MASKED_SECRET
+        elif isinstance(input_value, dict) and "password" in input_value:
+            safe_input = dict(input_value)
+            safe_input["password"] = MASKED_SECRET
+            safe_error["input"] = safe_input
+        safe_errors.append(safe_error)
+    return safe_errors
+
+
+async def _request_validation_exception_handler(
+    _request: Request,
+    exception: Exception,
+) -> JSONResponse:
+    """Return the standard 422 detail without reflecting submitted passwords."""
+
+    assert isinstance(exception, RequestValidationError)
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        content=jsonable_encoder({"detail": _safe_validation_errors(exception)}),
+    )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -20,6 +58,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         docs_url=docs_url,
         redoc_url=redoc_url,
         openapi_url=openapi_url,
+    )
+    application.add_exception_handler(
+        RequestValidationError,
+        _request_validation_exception_handler,
     )
     application.include_router(root_router)
 

@@ -16,7 +16,30 @@ DEVELOPMENT_DATABASE_NAME = "stms"
 MIGRATION_TEST_DATABASE_NAME = "stms_test"
 MIGRATION_TEST_DATABASE_USER = "stms_test"
 MIGRATION_TEST_HOSTS = frozenset({"127.0.0.1", "localhost"})
-MIGRATION_TEST_HOST_PORT = 5433
+DEFAULT_MIGRATION_TEST_HOST_PORT = 5433
+
+
+def get_migration_test_host_port(configured_port: str | None = None) -> int:
+    """Return the explicit Compose test port or the cross-platform default."""
+
+    raw_port = (
+        configured_port
+        if configured_port is not None
+        else os.getenv("STMS_POSTGRES_TEST_PORT", str(DEFAULT_MIGRATION_TEST_HOST_PORT))
+    )
+    try:
+        port = int(raw_port)
+    except ValueError:
+        raise pytest.UsageError(
+            "STMS_POSTGRES_TEST_PORT must be an integer from 1 to 65535"
+        ) from None
+
+    if not 1 <= port <= 65535:
+        raise pytest.UsageError(
+            "STMS_POSTGRES_TEST_PORT must be an integer from 1 to 65535"
+        )
+
+    return port
 
 
 def validate_test_database_url(
@@ -75,18 +98,27 @@ def validate_test_database_url(
     return test_url
 
 
-def validate_migration_test_target(test_database_url: str | None) -> URL:
+def validate_migration_test_target(
+    test_database_url: str | None,
+    expected_host_port: int | None = None,
+) -> URL:
     """Restrict schema-changing tests to the dedicated Compose test service."""
 
     test_url = validate_test_database_url(test_database_url, None)
+    host_port = (
+        expected_host_port
+        if expected_host_port is not None
+        else get_migration_test_host_port()
+    )
     if (
         test_url.host not in MIGRATION_TEST_HOSTS
         or test_url.database != MIGRATION_TEST_DATABASE_NAME
         or test_url.username != MIGRATION_TEST_DATABASE_USER
-        or test_url.port != MIGRATION_TEST_HOST_PORT
+        or test_url.port != host_port
     ):
         raise pytest.UsageError(
-            "migration tests require the dedicated stms_test service on port 5433"
+            "migration tests require the dedicated stms_test service on the "
+            "configured test port"
         )
 
     return test_url
@@ -120,11 +152,22 @@ def integration_engine(test_database_url: URL) -> Iterator[Engine]:
 
 
 @pytest.fixture(scope="session")
-def migration_test_database_url(test_database_url: URL) -> URL:
+def migration_test_host_port() -> int:
+    """Expose the validated host port shared by Compose and safety checks."""
+
+    return get_migration_test_host_port()
+
+
+@pytest.fixture(scope="session")
+def migration_test_database_url(
+    test_database_url: URL,
+    migration_test_host_port: int,
+) -> URL:
     """Revalidate the exact schema-changing target before migration tests."""
 
     return validate_migration_test_target(
-        test_database_url.render_as_string(hide_password=False)
+        test_database_url.render_as_string(hide_password=False),
+        migration_test_host_port,
     )
 
 

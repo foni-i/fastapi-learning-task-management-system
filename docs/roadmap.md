@@ -294,7 +294,7 @@ containers before this task starts.
 **Acceptance:**
 
 - Compose defines `postgres-dev` at host port 5432 with local sample database
-  `stms`, plus `postgres-test` at host port 5433 with local sample database
+  `stms`, plus `postgres-test` at default host port 5433 with local sample database
   `stms_test`; the services use distinct users and passwords.
 - Both services have health checks; development data is persistent while test
   data can be recreated without deleting the development volume.
@@ -348,6 +348,8 @@ required.
   clear setup message when integration tests are requested.
 - A safety guard rejects a test URL equal to `STMS_DATABASE_URL` and rejects a
   database name that is not explicitly test-only.
+- The default test host port is 5433; an explicit `STMS_POSTGRES_TEST_PORT`
+  override is allowed only when the test URL uses the same dedicated port.
 - Fixtures create synchronous connections/Sessions against the dedicated test
   service and always roll back/close/dispose resources as appropriate.
 - A smoke test executes `SELECT 1` and verifies the connected database is the

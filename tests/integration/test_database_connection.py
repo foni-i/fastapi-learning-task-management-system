@@ -9,7 +9,6 @@ pytestmark = pytest.mark.integration
 
 EXPECTED_DATABASE = "stms_test"
 EXPECTED_USER = "stms_test"
-EXPECTED_TEST_HOST_PORT = 5433
 TRANSACTION_PROBE_TABLE = "task_2_5_transaction_probe"
 
 
@@ -17,6 +16,7 @@ def test_connects_to_dedicated_postgresql_service(
     db_session: Session,
     integration_engine: Engine,
     test_database_url: URL,
+    migration_test_host_port: int,
 ) -> None:
     """Prove the configured synchronous target is the isolated Compose service."""
 
@@ -27,7 +27,7 @@ def test_connects_to_dedicated_postgresql_service(
     assert row[2] == EXPECTED_USER
     assert integration_engine.dialect.is_async is False
     assert test_database_url.drivername == "postgresql+psycopg"
-    assert test_database_url.port == EXPECTED_TEST_HOST_PORT
+    assert test_database_url.port == migration_test_host_port
     assert test_database_url.port != 5432
 
 

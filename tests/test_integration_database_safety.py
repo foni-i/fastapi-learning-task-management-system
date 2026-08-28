@@ -3,11 +3,15 @@
 import pytest
 
 from tests.integration.conftest import (
+    get_migration_test_host_port,
     validate_migration_test_target,
     validate_test_database_url,
 )
 
 SAFE_TEST_URL = "postgresql+psycopg://stms_test:test-password@127.0.0.1:5433/stms_test"
+OVERRIDE_TEST_URL = (
+    "postgresql+psycopg://stms_test:test-password@127.0.0.1:15433/stms_test"
+)
 SAFE_DEVELOPMENT_URL = "postgresql+psycopg://stms_dev:dev-password@127.0.0.1:5432/stms"
 
 
@@ -61,14 +65,54 @@ def test_rejects_unsafe_target_without_revealing_credentials(
     assert "@" not in error
 
 
-def test_accepts_exact_migration_test_target() -> None:
+def test_accepts_exact_default_migration_test_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Schema-changing commands may target only the dedicated Compose database."""
 
+    monkeypatch.delenv("STMS_POSTGRES_TEST_PORT", raising=False)
     parsed_url = validate_migration_test_target(SAFE_TEST_URL)
 
     assert parsed_url.database == "stms_test"
     assert parsed_url.username == "stms_test"
     assert parsed_url.port == 5433
+
+
+def test_accepts_explicit_migration_test_port_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the exact-port guard when Windows requires another host port."""
+
+    monkeypatch.setenv("STMS_POSTGRES_TEST_PORT", "15433")
+
+    parsed_url = validate_migration_test_target(OVERRIDE_TEST_URL)
+
+    assert parsed_url.port == 15433
+
+
+def test_rejects_url_that_does_not_match_configured_test_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Require Compose and migration URLs to select the same host port."""
+
+    monkeypatch.setenv("STMS_POSTGRES_TEST_PORT", "15433")
+
+    with pytest.raises(pytest.UsageError, match="configured test port"):
+        validate_migration_test_target(SAFE_TEST_URL)
+
+
+@pytest.mark.parametrize("configured_port", ["invalid", "0", "-1", "65536"])
+def test_rejects_invalid_configured_test_port_without_echoing_it(
+    configured_port: str,
+) -> None:
+    """Fail before database access with one bounded, non-reflective error."""
+
+    with pytest.raises(pytest.UsageError) as exc_info:
+        get_migration_test_host_port(configured_port)
+
+    error = str(exc_info.value)
+    assert error == "STMS_POSTGRES_TEST_PORT must be an integer from 1 to 65535"
+    assert configured_port not in error
 
 
 @pytest.mark.parametrize(

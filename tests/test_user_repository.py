@@ -1,6 +1,7 @@
 """Unit contract tests for the synchronous User repository."""
 
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 from sqlalchemy import Select
 from sqlalchemy.orm import Session
@@ -31,6 +32,27 @@ def test_get_by_email_uses_an_exact_user_email_predicate() -> None:
     assert statement.column_descriptions[0]["entity"] is User
     assert str(statement.whereclause) == "users.email = :email_1"
     assert statement.compile().params == {"email_1": "user@example.com"}
+    session.commit.assert_not_called()
+    session.rollback.assert_not_called()
+
+
+def test_get_by_id_uses_an_exact_user_uuid_predicate() -> None:
+    """Resolve only the precise UUID supplied by validated access-token claims."""
+
+    session = make_session_double()
+    user_id = uuid4()
+    expected_user = User(email="user@example.com", password_hash="stored-hash")
+    session.scalar.return_value = expected_user
+    repository = UserRepository(session)
+
+    result = repository.get_by_id(user_id)
+
+    assert result is expected_user
+    statement = session.scalar.call_args.args[0]
+    assert isinstance(statement, Select)
+    assert statement.column_descriptions[0]["entity"] is User
+    assert str(statement.whereclause) == "users.id = :id_1"
+    assert statement.compile().params == {"id_1": user_id}
     session.commit.assert_not_called()
     session.rollback.assert_not_called()
 

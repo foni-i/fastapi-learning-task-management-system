@@ -19,9 +19,11 @@ def test_default_application_is_importable_with_basic_metadata() -> None:
         "/health/ready",
         "/api/v1/auth/login",
         "/api/v1/auth/register",
+        "/api/v1/users/me",
     }
     assert set(paths["/api/v1/auth/login"]) == {"post"}
     assert set(paths["/api/v1/auth/register"]) == {"post"}
+    assert set(paths["/api/v1/users/me"]) == {"get"}
 
 
 def test_create_app_applies_explicit_settings() -> None:

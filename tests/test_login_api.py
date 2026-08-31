@@ -182,4 +182,3 @@ def test_login_openapi_has_bounded_request_response_and_error_contracts() -> Non
     }
     assert "password_hash" not in str(operation)
     assert "/api/v1/auth/refresh" not in schema["paths"]
-    assert "/api/v1/users/me" not in schema["paths"]

@@ -2,6 +2,7 @@
 
 DUPLICATE_EMAIL_MESSAGE = "An account with this email already exists"
 INVALID_CREDENTIALS_MESSAGE = "Invalid email or password"
+AUTHENTICATION_REQUIRED_MESSAGE = "Could not validate credentials"
 
 
 class DuplicateEmailError(Exception):

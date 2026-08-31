@@ -1,5 +1,7 @@
 """User persistence operations with caller-owned transaction control."""
 
+from uuid import UUID
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -16,6 +18,12 @@ class UserRepository:
         """Return the user whose stored canonical email exactly matches."""
 
         statement = select(User).where(User.email == email)
+        return self._session.scalar(statement)
+
+    def get_by_id(self, user_id: UUID) -> User | None:
+        """Return the user whose UUID exactly matches the validated subject."""
+
+        statement = select(User).where(User.id == user_id)
         return self._session.scalar(statement)
 
     def create(self, *, email: str, password_hash: str) -> User:

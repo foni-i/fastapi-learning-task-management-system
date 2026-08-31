@@ -9,11 +9,17 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.api import dependencies
 from app.api.dependencies import get_current_user
-from app.core.exceptions import AUTHENTICATION_REQUIRED_MESSAGE
+from app.api.v1.endpoints import users
+from app.core.exceptions import (
+    AUTHENTICATION_REQUIRED_MESSAGE,
+    DUPLICATE_EMAIL_MESSAGE,
+    DuplicateEmailError,
+)
 from app.core.tokens import (
     ACCESS_TOKEN_ERROR_MESSAGE,
     AccessTokenClaims,
@@ -22,6 +28,7 @@ from app.core.tokens import (
 from app.db.session import get_session
 from app.main import app
 from app.models.user import User
+from app.schemas.user import CurrentUserEmailUpdate, PublicUser
 
 
 class ControlledRepository:
@@ -48,6 +55,64 @@ def make_user() -> User:
             updated_at=timestamp,
         ),
     )
+
+
+@pytest.mark.parametrize(
+    ("raw_email", "expected"),
+    [
+        (" NEW@EXAMPLE.COM ", "new@example.com"),
+        ("User@例子.测试", "user@例子.测试"),
+        ("User@xn--fsqu00a.xn--0zwm56d", "user@例子.测试"),
+    ],
+)
+def test_current_user_email_update_stores_one_canonical_field(
+    raw_email: str,
+    expected: str,
+) -> None:
+    """Reuse the shared canonical email boundary for profile updates."""
+
+    update = CurrentUserEmailUpdate.model_validate({"email": raw_email})
+
+    assert update.model_dump() == {"email": expected}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"email": ""},
+        {"email": "   "},
+        {"email": "invalid-email"},
+        {"email": "user@example.com", "password": "not-allowed"},
+        {"email": "user@example.com", "user_id": str(uuid4())},
+        {"email": "user@example.com", "name": "not-allowed"},
+    ],
+    ids=(
+        "missing",
+        "empty",
+        "blank",
+        "invalid",
+        "password",
+        "user-id",
+        "profile-field",
+    ),
+)
+def test_current_user_email_update_rejects_invalid_or_extra_fields(
+    payload: dict[str, object],
+) -> None:
+    """Keep the PATCH allowlist restricted to one valid email field."""
+
+    with pytest.raises(ValidationError):
+        CurrentUserEmailUpdate.model_validate(payload)
+
+
+def test_current_user_email_update_rejects_overlong_email() -> None:
+    """Preserve the canonical 254-character storage boundary."""
+
+    domain = ".".join(("b" * 63, "c" * 63, "d" * 62))
+
+    with pytest.raises(ValidationError):
+        CurrentUserEmailUpdate.model_validate({"email": f"{'a' * 64}@{domain}"})
 
 
 @pytest.fixture
@@ -160,8 +225,157 @@ def test_current_user_route_uses_dependency_injection_and_public_schema(
     assert "password_hash" not in response.text
 
 
-def test_current_user_route_is_versioned_and_get_only(client: TestClient) -> None:
-    """Expose only the planned versioned GET operation."""
+def test_current_user_email_patch_delegates_normalized_input_and_same_session(
+    client: TestClient,
+    current_user_session: tuple[MagicMock, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep HTTP wiring thin and return the exact public allowlist."""
+
+    session, lifecycle = current_user_session
+    user = make_user()
+    observed: dict[str, object] = {}
+
+    def fake_update(
+        update: CurrentUserEmailUpdate,
+        received_user: User,
+        received_session: Session,
+    ) -> PublicUser:
+        observed["update"] = update
+        observed["user"] = received_user
+        observed["session"] = received_session
+        user.email = update.email
+        return PublicUser.model_validate(user)
+
+    app.dependency_overrides[get_current_user] = lambda: user
+    monkeypatch.setattr(users, "update_current_user_email", fake_update)
+    try:
+        response = client.patch(
+            "/api/v1/users/me",
+            json={"email": " NEW@EXAMPLE.COM "},
+        )
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+    assert response.status_code == 200
+    assert set(response.json()) == {"id", "email", "created_at", "updated_at"}
+    assert response.json()["email"] == "new@example.com"
+    update = observed["update"]
+    assert isinstance(update, CurrentUserEmailUpdate)
+    assert update.email == "new@example.com"
+    assert observed["user"] is user
+    assert observed["session"] is session
+    assert "password_hash" not in response.text
+    assert lifecycle == ["opened", "closed"]
+
+
+@pytest.mark.parametrize(
+    ("headers", "invalid_token"),
+    [
+        ({}, False),
+        ({"Authorization": "Bearer controlled.invalid.token"}, True),
+    ],
+    ids=("missing", "invalid"),
+)
+def test_current_user_email_patch_requires_valid_authentication(
+    headers: dict[str, str],
+    invalid_token: bool,
+    client: TestClient,
+    current_user_session: tuple[MagicMock, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject unauthenticated writes through the existing uniform boundary."""
+
+    _session, lifecycle = current_user_session
+    if invalid_token:
+        monkeypatch.setattr(
+            dependencies,
+            "validate_access_token",
+            MagicMock(side_effect=AccessTokenError(ACCESS_TOKEN_ERROR_MESSAGE)),
+        )
+
+    response = client.patch(
+        "/api/v1/users/me",
+        json={"email": "new@example.com"},
+        headers=headers,
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": AUTHENTICATION_REQUIRED_MESSAGE}
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert lifecycle == ["opened", "closed"]
+
+
+def test_current_user_email_patch_maps_duplicate_to_safe_409(
+    client: TestClient,
+    current_user_session: tuple[MagicMock, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expose no canonical input or database detail from either conflict path."""
+
+    _session, lifecycle = current_user_session
+    user = make_user()
+
+    def reject_duplicate(
+        _update: CurrentUserEmailUpdate,
+        _user: User,
+        _session: Session,
+    ) -> PublicUser:
+        raise DuplicateEmailError(DUPLICATE_EMAIL_MESSAGE)
+
+    app.dependency_overrides[get_current_user] = lambda: user
+    monkeypatch.setattr(users, "update_current_user_email", reject_duplicate)
+    try:
+        response = client.patch(
+            "/api/v1/users/me",
+            json={"email": " Taken@EXAMPLE.COM "},
+        )
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": DUPLICATE_EMAIL_MESSAGE}
+    assert "Taken@EXAMPLE.COM" not in response.text
+    assert "uq_users_email" not in response.text
+    assert "sql" not in response.text.casefold()
+    assert lifecycle == ["opened", "closed"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"email": "invalid-email"},
+        {"email": "user@example.com", "user_id": str(uuid4())},
+    ],
+    ids=("missing", "invalid", "extra"),
+)
+def test_current_user_email_patch_returns_422_before_service(
+    payload: dict[str, object],
+    client: TestClient,
+    current_user_session: tuple[MagicMock, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject invalid write shapes without entering the update use case."""
+
+    _session, lifecycle = current_user_session
+    service = MagicMock()
+    app.dependency_overrides[get_current_user] = make_user
+    monkeypatch.setattr(users, "update_current_user_email", service)
+    try:
+        response = client.patch("/api/v1/users/me", json=payload)
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+    assert response.status_code == 422
+    service.assert_not_called()
+    assert lifecycle == ["opened", "closed"]
+
+
+def test_current_user_route_is_versioned_with_only_planned_methods(
+    client: TestClient,
+) -> None:
+    """Expose only the planned versioned GET and PATCH operations."""
 
     assert client.get("/users/me").status_code == 404
     assert client.get("/api/users/me").status_code == 404
@@ -176,7 +390,7 @@ def test_current_user_openapi_declares_bearer_and_public_allowlist() -> None:
     public_user = schema["components"]["schemas"]["PublicUser"]
     security_scheme = schema["components"]["securitySchemes"]["BearerAuth"]
 
-    assert set(schema["paths"]["/api/v1/users/me"]) == {"get"}
+    assert set(schema["paths"]["/api/v1/users/me"]) == {"get", "patch"}
     assert set(operation["responses"]) == {"200", "401"}
     assert operation["security"] == [{"BearerAuth": []}]
     assert security_scheme == {
@@ -192,3 +406,21 @@ def test_current_user_openapi_declares_bearer_and_public_allowlist() -> None:
     }
     assert "password_hash" not in str(operation)
     assert "access_token" not in str(operation)
+
+
+def test_current_user_email_patch_openapi_is_strict_and_bearer_protected() -> None:
+    """Document the one-field write and its complete public response surface."""
+
+    schema = app.openapi()
+    operation = schema["paths"]["/api/v1/users/me"]["patch"]
+    update_schema = schema["components"]["schemas"]["CurrentUserEmailUpdate"]
+
+    assert operation["requestBody"]["required"] is True
+    assert set(operation["responses"]) == {"200", "401", "409", "422"}
+    assert operation["security"] == [{"BearerAuth": []}]
+    assert set(update_schema["properties"]) == {"email"}
+    assert update_schema["required"] == ["email"]
+    assert update_schema["additionalProperties"] is False
+    assert "password" not in str(update_schema)
+    assert "user_id" not in str(update_schema)
+    assert "password_hash" not in str(operation)

@@ -43,6 +43,21 @@ class RegistrationConflictResponse(BaseModel):
     detail: str
 
 
+class CurrentUserEmailUpdate(BaseModel):
+    """Accept only the canonical email field editable in Stage 4."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    email: str
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email_value(cls, value: str) -> str:
+        """Store the shared canonical email representation in the update."""
+
+        return normalize_email(value)
+
+
 class PublicUser(BaseModel):
     """Expose the explicit public allowlist for a persisted user."""
 

@@ -74,3 +74,21 @@ def test_create_adds_and_flushes_only_email_and_hash() -> None:
     session.flush.assert_called_once_with()
     session.commit.assert_not_called()
     session.rollback.assert_not_called()
+
+
+def test_update_email_changes_only_the_tracked_user_and_flushes() -> None:
+    """Keep the repository operation narrow and caller-transaction-owned."""
+
+    session = make_session_double()
+    repository = UserRepository(session)
+    user = User(email="old@example.com", password_hash="stored-hash")
+
+    result = repository.update_email(user, email="new@example.com")
+
+    assert result is user
+    assert user.email == "new@example.com"
+    assert user.password_hash == "stored-hash"
+    session.add.assert_not_called()
+    session.flush.assert_called_once_with()
+    session.commit.assert_not_called()
+    session.rollback.assert_not_called()

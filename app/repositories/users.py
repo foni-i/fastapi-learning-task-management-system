@@ -33,3 +33,10 @@ class UserRepository:
         self._session.add(user)
         self._session.flush()
         return user
+
+    def update_email(self, user: User, *, email: str) -> User:
+        """Change only a tracked user's canonical email and flush the caller's work."""
+
+        user.email = email
+        self._session.flush()
+        return user

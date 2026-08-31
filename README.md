@@ -1,8 +1,8 @@
 # FastAPI STMS
 
-FastAPI STMS 是一个分阶段构建的学习项目。当前完成了阶段 1 应用骨架，以及阶段 2 的同步 SQLAlchemy 基础设施、Alembic 环境、相互隔离的 PostgreSQL 服务、专用集成测试框架、空 baseline migration 和数据库 readiness 检查。
+FastAPI STMS 是一个分阶段构建的学习项目。当前已完成 Stage 1 应用骨架、Stage 2 PostgreSQL/迁移基础设施，以及 Stage 3 用户注册。注册链路使用 FastAPI、Pydantic 2、SQLAlchemy 2 同步 Session、PostgreSQL、Alembic 和 Argon2id，并有真实 PostgreSQL 端到端测试。
 
-目前尚未实现任何业务数据库表、认证、用户、项目、任务或 CI。不要把当前仓库当作完整的任务管理系统。
+当前只实现用户注册，尚未实现登录、JWT、Access Token、Refresh Token、退出登录、当前用户、用户资料修改、管理员、密码找回、项目、任务或 CI。不要把当前仓库当作完整的任务管理系统。
 
 ## 前置条件
 
@@ -12,7 +12,7 @@ FastAPI STMS 是一个分阶段构建的学习项目。当前完成了阶段 1 �
 - `uv`；项目所需的 Python 3.14 由 `uv` 管理
 - Docker Desktop，并启用 WSL 2 Linux 容器后端
 
-运行 FastAPI 骨架本身不需要 PostgreSQL；运行阶段 2 数据库环境需要 Docker Desktop。
+导入应用、查看 OpenAPI 和调用 liveness 不需要 PostgreSQL；注册、readiness、迁移和数据库 integration 测试需要 PostgreSQL。
 
 ## 安装 uv
 
@@ -67,11 +67,11 @@ Copy-Item .env.example .env
 
 ## SQLAlchemy 数据库基础设施
 
-阶段 2 使用 SQLAlchemy 2 同步 API，各组件职责如下：
+项目使用 SQLAlchemy 2 同步 API，各组件职责如下：
 
-- `Base`（`app/db/base.py`）只提供共享的 declarative metadata。目前 metadata 为空，不包含用户、认证、项目、任务或其他业务表。
+- `Base`（`app/db/base.py`）提供共享 declarative metadata；Stage 3 的 `User` ORM 映射到 `users` 表。
 - `Engine`（`app/db/session.py`）管理连接池和数据库方言。它按进程缓存、同步运行，并配置有限的连接超时；创建 Engine 不会立即连接，首次 `connect()` 或 Session 执行 SQL 时才访问 PostgreSQL。
-- `sessionmaker` 绑定上述 Engine，用于创建短生命周期的同步 `Session`。`get_session()` 每次 yield 一个 Session，并在 `finally` 中关闭；它不会隐藏 `commit`，未来的写入 use case 必须自行拥有提交/回滚边界。
+- `sessionmaker` 绑定上述 Engine，用于创建短生命周期的同步 `Session`。`get_session()` 每个请求 yield 一个 Session，并在 `finally` 中关闭；注册 Service 拥有 `commit`/`rollback`，Repository 只查询、`add` 和 `flush`。
 - readiness 探针使用短生命周期 `Connection` 执行 `SELECT 1`，通过上下文管理器在成功或查询异常时归还连接池。它不创建 Session，也不修改数据。
 
 ## PostgreSQL 开发与测试环境
@@ -216,6 +216,97 @@ curl.exe -i http://127.0.0.1:8000/health/ready
 
 如果将 `STMS_API_DOCS_ENABLED` 设为 `false`，上述两个文档入口会被关闭。
 
+## 用户注册
+
+Stage 3 公开以下路由，且不应出现其他产品路由：
+
+| 方法 | 路径 | 结果 |
+| --- | --- | --- |
+| `GET` | `/health/live` | 应用进程存活状态 |
+| `GET` | `/health/ready` | 数据库就绪状态 |
+| `POST` | `/api/v1/auth/register` | 创建最小用户并返回公开字段 |
+
+### 注册请求
+
+请求体只允许 `email` 和 `password`，额外字段返回 422：
+
+```powershell
+$body = @{
+    email = "  Learner@EXAMPLE.COM "
+    password = "<example-only-12-to-128-character-password>"
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+    -Method Post `
+    -Uri http://127.0.0.1:8000/api/v1/auth/register `
+    -ContentType "application/json" `
+    -Body $body
+```
+
+示例密码只用于本机演示，不是正式凭据。应用不会记录请求密码。
+
+邮箱按固定顺序处理：
+
+1. 去除整个输入的首尾空白。
+2. 验证邮箱语法并规范化国际化域名；不执行 DNS 或可送达性检查。
+3. 对规范化后的完整邮箱执行 Unicode `casefold()`。
+4. 再次确认结果不超过 254 个字符。
+
+数据库保存这个规范化值。PostgreSQL 命名唯一约束 `uq_users_email` 保证相同规范化邮箱不能重复，但数据库不会自动规范化任意原始邮箱。
+
+密码规则为 12～128 个字符，并拒绝纯空白值。应用不 trim、不截断、不 casefold、不改变大小写，也不要求任意复杂字符组合。明文只在校验和哈希所需的最短范围存在，数据库只保存 Argon2id hash。
+
+### 注册响应
+
+成功返回 HTTP 201，且字段白名单严格为：
+
+```json
+{
+  "id": "019c3d61-f4f7-7b1f-9e28-d31bc7359f47",
+  "email": "learner@example.com",
+  "created_at": "2026-08-28T10:30:00Z",
+  "updated_at": "2026-08-28T10:30:00Z"
+}
+```
+
+- `id` 是 PostgreSQL 生成的 UUID。
+- `email` 是规范化后的存储值。
+- 时间戳是 timezone-aware UTC ISO 8601。
+- 响应、OpenAPI 和公开 Schema 均不包含 `password` 或 `password_hash`。
+
+相同规范化邮箱返回 HTTP 409：
+
+```json
+{
+  "detail": "An account with this email already exists"
+}
+```
+
+非法邮箱、弱密码或额外字段返回 HTTP 422。密码相关错误中的原始输入会被遮蔽；409 和 422 均不会返回密码、hash、SQL、约束诊断或原始数据库异常。
+
+### 注册事务与并发
+
+注册调用链为：
+
+```text
+POST /api/v1/auth/register
+-> UserRegistrationRequest
+-> Router 注入请求级同步 Session
+-> Registration Service
+-> User Repository
+-> PostgreSQL
+-> PublicUser 或安全错误
+```
+
+- Router 只拥有 HTTP 解析、依赖、状态码和响应模型。
+- Schema 负责请求验证、秘密感知输入和公开字段白名单。
+- Service 协调规范化、密码策略、Argon2id 和完整写事务；成功 `commit`，异常 `rollback`。
+- Repository 只执行邮箱查询、`add` 和 `flush`，不独立提交或回滚。
+- 请求依赖在响应路径结束后关闭 Session。
+- 应用层提前查询提供常规重复邮箱错误；并发请求都通过早期查询时，`uq_users_email` 是最终防线。真实双 Session 测试证明同一规范化邮箱只能一个请求返回 201，另一个返回安全 409。
+
+登录、JWT、Access Token、Refresh Token、退出登录和当前用户功能属于后续阶段，当前均不可用。
+
 ## 测试和质量检查
 
 运行普通测试：
@@ -246,20 +337,20 @@ uv lock --check
 git diff --check
 ```
 
-阶段 2 的完整质量门禁是普通 pytest、显式 PostgreSQL integration pytest、Ruff lint、Ruff format、mypy、lock check 和 diff check。SQLite 不作为 PostgreSQL integration 行为的替代品。
+Stage 3 的完整质量门禁是普通 pytest、显式 PostgreSQL integration pytest、迁移往返、Ruff lint、Ruff format、mypy、lock check 和 diff check。SQLite 不作为 PostgreSQL integration 行为的替代品。
 
-## Stage 2 最终验证顺序
+## Stage 3 最终验证顺序
 
-下面的流程只操作本项目 Compose 服务。测试库迁移往返前应重建 `postgres-test`，以获得空的 `tmpfs`；不得重建 `postgres-dev` 或删除开发 named volume。
+下面的流程只操作可丢弃的 `postgres-test`。迁移往返前重建该服务以获得空 `tmpfs`；不要启动、重建或停止 `postgres-dev`，也不要删除开发 named volume。
 
-1. 运行 `docker version`、`docker compose version` 和 `docker compose config --quiet`。
-2. 运行 `docker compose up -d --wait postgres-dev postgres-test`，确认两个服务均为 `healthy`。
-3. 分别通过同步 Psycopg 对开发库和测试库执行 `SELECT 1`，并核对数据库名、当前用户和服务端口。
-4. 只重建 `postgres-test`，对空测试库执行 baseline `upgrade head -> downgrade base -> upgrade head`，再运行 `alembic current` 和 `alembic check`。
-5. 验证 readiness `200 -> 503 -> 200`，同时确认 liveness 始终为 200。
-6. 在不设置数据库环境变量的进程中运行普通 `uv run pytest`，再对专用测试库运行 `uv run pytest -m integration`。
-7. 运行全部质量门，审查 Git diff 和迁移漂移。
-8. 运行 `docker compose down` 停止并移除本项目容器和网络；不要添加 `--volumes`。随后用 `docker volume inspect fastapi-stms-postgres-dev-data` 确认开发 named volume 仍存在。
+1. 在没有数据库连接的情况下运行普通 pytest、warnings、Ruff、mypy、lock 和 diff 检查。
+2. 运行 `docker version` 和 `docker compose config --quiet`。
+3. 配置同一个专用测试端口和 `STMS_TEST_DATABASE_URL`，再只重建并启动 `postgres-test`。
+4. 使用 `validate_migration_test_target` 验证驱动、本地主机、数据库、用户和配置端口。
+5. 对空测试库执行 `upgrade head -> downgrade 2f6a8c1d4b90 -> upgrade head`。
+6. 运行 `alembic current`、`alembic heads` 和 `alembic check`，确认唯一 head 为 `9f3b2d6e8a41` 且没有 metadata drift。
+7. 运行全部 integration 测试，包含真实注册 201、422、顺序重复 409 和确定性双 Session 并发冲突。
+8. 只运行 `docker compose stop postgres-test`；不要执行 `down --volumes`。
 
 ## 当前项目结构
 
@@ -269,29 +360,39 @@ FastAPI-STMS/
 |   |-- api/
 |   |   |-- v1/
 |   |   |   |-- endpoints/
-|   |   |   |   `-- __init__.py
+|   |   |   |   |-- __init__.py
+|   |   |   |   `-- auth.py
 |   |   |   |-- __init__.py
 |   |   |   `-- router.py
 |   |   |-- __init__.py
 |   |   |-- health.py
 |   |   `-- router.py
 |   |-- core/
-|   |   |-- __init__.py
-|   |   `-- config.py
+|   |   |-- config.py
+|   |   |-- email_normalization.py
+|   |   |-- exceptions.py
+|   |   `-- security.py
 |   |-- db/
 |   |   |-- __init__.py
 |   |   |-- base.py
 |   |   |-- probe.py
 |   |   `-- session.py
+|   |-- models/
+|   |   `-- user.py
+|   |-- repositories/
+|   |   `-- users.py
 |   |-- schemas/
-|   |   |-- __init__.py
-|   |   `-- health.py
+|   |   |-- health.py
+|   |   `-- user.py
+|   |-- services/
+|   |   `-- registration.py
 |   |-- __init__.py
 |   `-- main.py
 |-- alembic/
 |   |-- versions/
-|   |   |-- .gitkeep
-|   |   `-- 20260825_0001_stage_2_baseline.py
+|   |   |-- 20260825_0001_stage_2_baseline.py
+|   |   |-- 20260826_0002_create_users_table.py
+|   |   `-- 20260826_0003_add_user_email_unique_constraint.py
 |   |-- env.py
 |   `-- script.py.mako
 |-- docs/
@@ -306,12 +407,17 @@ FastAPI-STMS/
 |   |   |-- conftest.py
 |   |   |-- test_database_connection.py
 |   |   |-- test_migrations.py
+|   |   |-- test_registration.py
+|   |   |-- test_registration_conflict.py
 |   |   `-- test_readiness.py
 |   |-- test_alembic_config.py
 |   |-- test_config.py
 |   |-- test_db_session.py
 |   |-- test_health.py
 |   |-- test_integration_database_safety.py
+|   |-- test_registration_api.py
+|   |-- test_registration_service.py
+|   |-- test_security.py
 |   `-- test_main.py
 |-- alembic.ini
 |-- compose.yaml
@@ -329,6 +435,6 @@ FastAPI-STMS/
 
 ## 当前范围与下一阶段
 
-阶段 1 提供可运行、可测试的应用骨架。阶段 2 已提供同步数据库配置、空 metadata、Session 工厂、Alembic 环境、相互隔离的 PostgreSQL 服务、专用集成测试框架、不创建业务表的 baseline revision，以及数据库感知的 readiness。版本化的 `/api/v1` Router 仍没有产品功能。
+Stage 3 已实现版本化用户注册、User ORM 和迁移、规范化邮箱唯一性、秘密感知 Schema、Argon2id、同步 Repository/Service、事务边界、安全 409，以及真实 PostgreSQL HTTP 与并发测试。
 
-下一阶段是 **Stage 3 — Registration**。建议第一项 1–2 小时任务只实现用户 ORM 模型及对应 Alembic migration，并验证邮箱规范化/唯一约束和迁移往返；在项目所有者确认 Stage 2 前不得开始。
+下一阶段是 **Stage 4 — Login and current user**，但必须先完成 Stage 3 最终验收并获得项目所有者确认。当前不得提前实现登录、JWT、Access Token 或当前用户依赖。

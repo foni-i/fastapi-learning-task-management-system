@@ -18,6 +18,23 @@ HTTP client
     -> response schema -> HTTP response
 ```
 
+The future Agent path reuses the same domain boundary rather than creating a
+second persistence stack:
+
+```text
+Authenticated request or controlled CLI
+    -> Agent run boundary (trusted user identity)
+    -> LangGraph node
+    -> strict Agent tool schema
+    -> Domain service (authorization and transaction)
+    -> Repository
+    -> SQLAlchemy synchronous Session
+    -> PostgreSQL
+```
+
+Nodes and tools never query the database directly. This keeps HTTP and Agent
+entry points consistent and makes business rules independently testable.
+
 ## Planned source layout
 
 ```text
@@ -49,6 +66,11 @@ tests/
 This is a target layout, not authorization to create every module in Stage 1.
 Folders should appear only when a current task needs them.
 
+When the corresponding stages begin, Agent code may be introduced under a
+project-consistent `app/agent/` tree with `schemas`, `tools`, `graph`, `nodes`,
+`prompts`, and evaluation support. These are planned ownership boundaries, not
+authorization to create empty directories early.
+
 ## Layer responsibilities
 
 | Layer | Owns | Must not own |
@@ -74,6 +96,11 @@ after the response path. Each write use case owns one explicit transaction.
 Repositories call `flush` when generated values are needed but do not call
 `commit`; exceptions leave the use case responsible for rollback. Read use cases
 do not commit.
+
+Agent tools call the same service functions as routers. A trusted request/run
+context supplies the authenticated user ID outside model-controlled arguments.
+Synchronous database calls remain behind service boundaries; LangGraph alone is
+not a reason to migrate the application to AsyncSession.
 
 Authorization is defense in depth:
 
@@ -105,6 +132,19 @@ cryptographic hash, expiration, revocation state, rotation lineage as required,
 and non-sensitive metadata. Raw tokens exist only at issuance/verification
 boundaries.
 
+Agent persistence has three separate concerns:
+
+1. Domain data remains in `users`, `projects`, and `tasks` and is changed only
+   through domain services.
+2. Agent business records contain thread/run identifiers, approval decisions,
+   executed-tool summaries, outcomes, errors, and metrics needed for audit and
+   product behavior.
+3. LangGraph checkpoints use the official persistence schema and lifecycle for
+   graph recovery. Checkpoint rows are not a substitute for business audit data.
+
+Graph state stores serializable identifiers and validated values, never Sessions,
+connections, ORM objects, provider clients, API keys, or hidden model reasoning.
+
 ## API and error design
 
 Product endpoints live under `/api/v1`; health endpoints remain unversioned.
@@ -133,6 +173,16 @@ implemented. Access JWT validation checks signature, expiration, token type, and
 configured issuer/audience. Refresh-token rotation is transactional so a token
 cannot be successfully reused after rotation.
 
+Model provider keys are secret settings and never enter state, logs, traces, or
+test fixtures. Tool names and arguments are allowlisted and validated before
+execution. High-impact writes pause for explicit approval and carry idempotency
+keys so retry or resume cannot duplicate work. Retrieved documents are untrusted
+context and cannot override authorization, approval, or tool policies.
+
+Tracing records prompt version, node/tool names, safe input summaries, outcomes,
+latency, token usage, and errors. It does not record complete credentials,
+Authorization headers, sensitive model payloads, or chain-of-thought.
+
 ## Testing strategy
 
 - Unit tests exercise pure validation, security helpers, and service rules with
@@ -145,6 +195,11 @@ cannot be successfully reused after rotation.
 - Migration checks start from an empty database, upgrade to head, downgrade as
   required by the stage, and upgrade again.
 - Quality gates are pytest, Ruff lint, Ruff format check, and mypy.
+- Provider adapters are replaceable with deterministic fakes. Ordinary tests
+  never require network model calls; external-provider tests use a separate
+  marker and explicit credentials.
+- Nodes and tools are tested independently. Prompt changes run versioned offline
+  regression evaluations before acceptance.
 
 SQLite is not treated as equivalent to PostgreSQL. Small pure unit tests may not
 need a database, but database integration behavior is proven against PostgreSQL.

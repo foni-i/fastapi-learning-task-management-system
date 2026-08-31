@@ -1896,39 +1896,161 @@ owner confirmation.
 - Ruff, formatting, mypy, lock, migration-head/drift, OpenAPI, and diff checks
   pass, then the stage stops for owner confirmation.
 
-### Stage 5 — Refresh, logout, and password change
+### Stage 5 — Deferred authentication hardening
 
-Add hashed refresh-token persistence, atomic rotation and revocation, logout,
-and password change with global refresh-token revocation.
+Preserve refresh-token persistence, rotation, revocation, logout, and password
+change as a security-hardening track. It is not deleted, but it does not block
+the first Agent MVP. The Agent critical path is Stage 4 -> 6 -> 7 -> 8 -> 9 ->
+10 -> 11 -> 12; Stage 5 can be scheduled after the first Agent demonstration.
 
-### Stage 6 — Projects
+- **Task 5.1:** Refresh-token model, indexes, and reversible migration.
+- **Task 5.2:** Random token issuance, hash-only storage, and transaction tests.
+- **Task 5.3:** Atomic refresh rotation and old-token reuse rejection.
+- **Task 5.4:** Refresh HTTP endpoint with secret-safe cookie/body contract.
+- **Task 5.5:** Logout revocation for the presented refresh token.
+- **Task 5.6:** Password change plus all-refresh-token revocation.
+- **Task 5.7:** Real PostgreSQL security integration and documentation.
 
-Implement in separate tasks: create, detail, paginated list, update, archive, and
-conditional delete. Test date rules, ownership isolation, pagination, and 409 for
-non-empty deletion.
+Each task remains approximately 1–2 focused hours and retains short-lived
+stateless access-token semantics. Do not add a denylist, device management,
+OAuth providers, or administrator behavior.
 
-### Stage 7 — Tasks
+### Stage 6 — Agent-ready project core
 
-Implement in separate tasks: create, detail, paginated list, filtering/sorting,
-update, state transitions, and delete. Test project ownership, dates, completion
-timestamps, idempotency, stable sorting, and isolation.
+Implement only project behavior required by the Agent MVP. Every query is scoped
+by authenticated user ID; clients and models never supply ownership.
 
-### Stage 8 — Engineering completion
+- **Task 6.1:** Project decisions, ORM model, constraints, and reversible migration.
+- **Task 6.2:** Strict create/update/public/list schemas and date validation.
+- **Task 6.3:** Owned Repository queries and Service transaction contracts.
+- **Task 6.4:** `POST /api/v1/projects` with exact public response.
+- **Task 6.5:** Owned project detail and deterministic paginated list.
+- **Task 6.6:** Project update and idempotent archive action.
+- **Task 6.7:** PostgreSQL ownership/constraint integration and documentation.
 
-Finish common error translation, request IDs, structured logs, application Docker
-service, CI, complete README/API examples, and clean-environment verification.
+Do not add collaboration, sharing, teams, roles, or model-facing tools. Hard
+delete is deferred unless a later accepted requirement makes it necessary.
 
-### Stage 9 — Version 2
+### Stage 7 — Agent-ready task core
 
-Only after MVP acceptance, implement tags, study sessions, actual-duration
-aggregation, and statistics as individually tested tasks.
+Tasks belong to both a user and one of that user's projects. Service logic owns
+state transitions and dates; Repository predicates enforce ownership isolation.
 
-## Stage 0 consistency checklist
+- **Task 7.1:** Task decisions, ORM model, ownership constraints, and migration.
+- **Task 7.2:** Strict create/update/public/list schemas and bounded inputs.
+- **Task 7.3:** Owned Repository plus create Service and transaction tests.
+- **Task 7.4:** Create and retrieve task HTTP endpoints.
+- **Task 7.5:** Stable pagination with status/project filters and sort allowlist.
+- **Task 7.6:** Update fields and adjust deadline with date invariants.
+- **Task 7.7:** Idempotent completion/reopen behavior and server timestamps.
+- **Task 7.8:** Archive or safe-delete behavior with ownership protection.
+- **Task 7.9:** PostgreSQL isolation/invariant integration and documentation.
 
-- MVP and Version 2 boundaries match `docs/requirements.md` and the governing
-  brief.
+Do not add tags, study sessions, recurrence, collaboration, reminders, or Agent
+execution before this domain API is stable.
+
+### Stage 8 — LLM foundation and Agent tools
+
+Build a transparent minimum Agent loop before LangGraph. Select the provider and
+maintained SDK only when Task 8.1 confirms Python compatibility; do not build a
+general provider framework for hypothetical vendors.
+
+- **Task 8.1:** Secret-aware provider/model settings and one replaceable adapter.
+- **Task 8.2:** Versioned prompts plus strict Pydantic goal/plan/result schemas.
+- **Task 8.3:** Structured output with timeout, retry, and safe error mapping.
+- **Task 8.4:** Read tools `list_projects` and `list_tasks` through Services.
+- **Task 8.5:** Write tools `create_task` and `update_task` through Services.
+- **Task 8.6:** Minimal bounded tool-calling loop and internal CLI/test entry.
+- **Task 8.7:** Streaming model-response foundation and safe progress events.
+- **Task 8.8:** Token/latency metrics, prompt versions, fakes, and separately
+  marked external-provider smoke tests.
+
+Tool schemas exclude `user_id`; trusted authentication/run context supplies it.
+Tools never receive Sessions or import repositories. Ordinary tests use a fake
+provider and never require an external API key.
+
+### Stage 9 — Single-Agent LangGraph workflow
+
+Introduce LangGraph only after Stage 8 tools are independently usable. The first
+version is deliberately one Agent with explicit, serializable state.
+
+- **Task 9.1:** State contract and graph input/output schemas.
+- **Task 9.2:** `analyze_goal` and `load_context` nodes.
+- **Task 9.3:** `generate_plan` and deterministic `validate_plan` nodes.
+- **Task 9.4:** `request_approval` decision and plan-edit conditional loop.
+- **Task 9.5:** `execute_tasks` through approved tools with bounded steps.
+- **Task 9.6:** `verify_result` and `summarize` nodes.
+- **Task 9.7:** Graph composition, conditional branches, failures, and tests.
+
+Stage 9 can model approval decisions in one process, but durable interrupt/resume
+and service-restart recovery belong to Stage 10. State contains no Session, ORM
+object, provider client, key, or hidden reasoning.
+
+### Stage 10 — Persistence, HITL, and streaming
+
+Separate LangGraph recovery state from product audit records and make execution
+safe across retries and restarts.
+
+- **Task 10.1:** Thread/run/approval business records and reversible migration.
+- **Task 10.2:** Official PostgreSQL LangGraph checkpointer integration.
+- **Task 10.3:** Stable `thread_id`/`run_id` creation and ownership lookup.
+- **Task 10.4:** Approve, reject, and edit interrupt/resume workflow.
+- **Task 10.5:** Tool idempotency and duplicate-write prevention.
+- **Task 10.6:** Mandatory approval for batch creation, deletion, and high impact.
+- **Task 10.7:** SSE node/tool/progress streaming without hidden reasoning.
+- **Task 10.8:** Restart recovery, audit-summary, and PostgreSQL tests.
+
+Checkpoint tables are managed by the official persistence implementation and
+are not queried as the product's audit API.
+
+### Stage 11 — Focused RAG, evaluation, security, and tracing
+
+RAG is limited to user-uploaded syllabi, exam requirements, and study material
+used to produce source-grounded learning plans.
+
+- **Task 11.1:** Upload metadata, document parsing, and bounded file safety.
+- **Task 11.2:** Chunking, embedding adapter, pgvector migration, and storage.
+- **Task 11.3:** User/document metadata filtering and vector retrieval.
+- **Task 11.4:** Hybrid retrieval, reranker decision, and source citations.
+- **Task 11.5:** Context assembly and prompt-injection boundary tests.
+- **Task 11.6:** Safe tracing for nodes, tools, errors, token use, and latency.
+- **Task 11.7:** Versioned 30–50 sample offline evaluation dataset and runner.
+- **Task 11.8:** Metrics for extraction, tool/argument accuracy, plan violations,
+  writes, approval bypass, recovery, duplicates, latency, and token cost.
+
+Retrieved instructions are untrusted context and cannot alter identity,
+authorization, approval, system policy, or the tool allowlist.
+
+### Stage 12 — Deployment and job-search presentation
+
+- **Task 12.1:** Application service in Docker Compose and one-command startup.
+- **Task 12.2:** GitHub Actions for tests, integration safety, Ruff, mypy, and lock.
+- **Task 12.3:** Complete README, `.env.example`, API examples, and demo data.
+- **Task 12.4:** System architecture and LangGraph state diagrams.
+- **Task 12.5:** Reproducible demo/recording and test/evaluation results.
+- **Task 12.6:** Failure cases, improvements, security statement, and cost notes.
+- **Task 12.7:** Resume description and interview question/answer checklist.
+
+MCP exposure of project/task capabilities and multi-agent experiments begin only
+after Stage 12 acceptance. They are not part of the first Agent MVP.
+
+### Post-Stage 12 enhancements
+
+- Version 2 domain analytics add user-owned tags, non-overlapping study sessions,
+  server-calculated actual duration, bounded statistics, and the timezone contract
+  required for local-day reporting.
+- MCP may expose already-stable project and task capabilities after its identity,
+  authorization, and tool contracts have independent tests.
+- Multi-agent experiments require a measured need that the explicit single-Agent
+  graph cannot meet; they are not a default architecture goal.
+
+## Roadmap consistency checklist
+
+- Domain, first Agent MVP, deferred authentication, and post-MVP boundaries match
+  `docs/requirements.md` and the governing brief.
 - Layering, transactions, ownership, and technology choices match
   `docs/architecture.md` and `AGENTS.md`.
-- Stage 1 tasks contain no database, authentication, project, or task behavior.
-- Environment gaps are recorded without claiming unavailable checks passed.
-- There are no unresolved decisions that block Task 1.1.
+- Historical Stage 1–4 task contracts remain unchanged.
+- Agent dependencies and directories appear only in their introducing task.
+- Stage 5 is non-blocking; Stage 6 follows Stage 4 on the Agent MVP path.
+- No roadmap statement claims a future Agent capability is already implemented.

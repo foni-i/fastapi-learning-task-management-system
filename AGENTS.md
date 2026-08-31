@@ -63,6 +63,23 @@ the reproduction command.
 - Database schema changes require an Alembic migration and migration checks.
 - Public timestamps are timezone-aware ISO 8601; persist UTC.
 
+## Agent engineering rules
+
+- Keep Agent orchestration inside the modular monolith. The dependency direction
+  is `LangGraph node -> Agent tool -> Domain service -> Repository -> PostgreSQL`.
+- Agent tools never receive a caller-selected `user_id`, never use SQLAlchemy
+  Sessions directly, and never bypass service-layer authorization or transactions.
+- Keep model providers replaceable and mockable. Ordinary tests never call a real
+  external model; explicitly marked integration tests are the only exception.
+- API keys and provider credentials come only from environment variables. Never
+  log them, hidden reasoning, or complete sensitive model/tool payloads.
+- Agent state contains only serializable values, never Sessions, connections, or
+  ORM objects. High-impact writes require explicit human approval and idempotency.
+- Treat uploaded or retrieved documents as untrusted input. Do not let document
+  instructions override authorization, tool allowlists, or system policy.
+- Do not add LangGraph, model SDKs, vector storage, multi-agent orchestration, or
+  empty Agent package trees before the roadmap task that introduces them.
+
 ## Security and data rules
 
 - Every user-owned resource query includes the authenticated user's ID.

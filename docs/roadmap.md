@@ -1318,10 +1318,583 @@ acceptance and a separate Stage 4 instruction.
 
 ## Later stages
 
-### Stage 4 — Login and current user
+## Stage 4 — Login and current user
 
-Add access JWT issuance and validation, authentication dependency, login, and
-current-user read/update. Test valid, invalid, expired, and tampered tokens.
+Stage 4 adds short-lived access-token authentication on top of the accepted
+Stage 3 user and password contracts. It provides login, Bearer-token validation,
+an authenticated-user dependency, and read/update operations for the current
+user. The implementation continues to use synchronous SQLAlchemy Sessions and
+the existing Router -> Service -> Repository -> SQLAlchemy boundaries.
+
+This stage does not add refresh tokens, token persistence, rotation, logout,
+password change, revocation, a denylist, administrators, projects, or tasks.
+Those capabilities remain in Stage 5 or later. Access tokens are short-lived
+JWTs and are not stored in the database, so Stage 4 requires no schema change or
+Alembic revision unless the accepted plan is explicitly revised first.
+
+### Stage 4 security and API decisions
+
+- The first result milestone is Tasks 4.1 through 4.3: access-token primitives,
+  login orchestration, and `POST /api/v1/auth/login`. It ends with one usable
+  login endpoint but no protected resource yet.
+- Use a maintained JWT library confirmed compatible with the locked Python 3.14
+  environment. Prefer PyJWT if that compatibility check succeeds; add and lock
+  the dependency only in Task 4.1 and do not guess a version in advance.
+- Use a fixed application-selected HMAC algorithm rather than accepting an
+  algorithm from token input. The signing secret is a `SecretStr` supplied by
+  environment configuration, has no committed real value, and is never logged,
+  serialized, or placed in an exception.
+- Access-token settings are `STMS_ACCESS_TOKEN_SECRET`,
+  `STMS_ACCESS_TOKEN_TTL_MINUTES`, `STMS_ACCESS_TOKEN_ISSUER`, and
+  `STMS_ACCESS_TOKEN_AUDIENCE`. The TTL defaults to 15 minutes and is limited to
+  1–60 minutes. Issuer defaults to `fastapi-stms` and audience to
+  `fastapi-stms-api`; token creation and validation use timezone-aware UTC.
+- The signing algorithm is the application constant `HS256`; it is not an
+  environment setting. The signing secret has no application default and must
+  contain at least 32 characters before a token operation is allowed.
+- The minimum access-token claims are `sub` (the user UUID as text), `type`
+  (`access`), `iat`, `exp`, `iss`, and `aud`. Validation checks every claim,
+  signature, the fixed algorithm, issuer, audience, and expiry before resolving
+  a user.
+- Login accepts canonicalizable email and a secret-aware, non-empty password of
+  at most 128 Unicode characters without trimming or normalization. It does not
+  reapply the registration minimum-length rule: syntactically valid credential
+  attempts reach the same authentication decision. Failed
+  account lookup and failed password verification return the same generic 401
+  response and must not disclose whether the account exists.
+- The login failure detail is exactly `Invalid email or password`. Access-token
+  dependency failures use exactly `Could not validate credentials`; both are
+  stable non-sensitive messages and both HTTP paths use status 401.
+- Stage 4 login returns an access token only. Refresh-token issuance and any
+  extension of the login response belong exclusively to Stage 5.
+- Bearer credentials are parsed by a FastAPI dependency, but token validation
+  and user lookup remain outside routers. Malformed, expired, tampered, wrong-
+  type, wrong-issuer, wrong-audience, or unknown-user tokens share one safe 401
+  contract with `WWW-Authenticate: Bearer`.
+- Current-user responses reuse the explicit `PublicUser` allowlist. Tokens,
+  passwords, `password_hash`, signing material, and database diagnostics never
+  enter API responses, OpenAPI examples, logs, or test output.
+- The only profile field available in the current `User` model is canonical
+  email. Task 4.6 therefore limits `PATCH /api/v1/users/me` to an email change;
+  it reuses normalization and `uq_users_email` race handling. It does not change
+  passwords or add profile columns.
+
+Each task below is sized for approximately 1–2 focused hours. Complete tasks in
+order and stop at each declared milestone boundary for owner review.
+
+### Task 4.1 — Access-token settings and JWT primitives
+
+**Goal:** Add typed access-token configuration plus small, independently tested
+JWT creation/validation primitives, without HTTP, database, or login behavior.
+
+**Prerequisites:** Stage 3 is accepted and committed; the worktree is clean;
+`9f3b2d6e8a41` remains the single Alembic head; no JWT dependency or Stage 4
+implementation exists.
+
+**Files:**
+
+- Update `pyproject.toml` and `uv.lock` with one maintained JWT runtime
+  dependency after confirming Python 3.14 compatibility.
+- Update `app/core/config.py` and `.env.example` with non-secret access-token
+  settings.
+- Add a focused token module under `app/core/`, keeping password hashing in its
+  existing module.
+- Add connection-free configuration and token tests.
+
+**Implementation scope:** Define fixed `HS256`, a secret-aware signing key with
+no default and a 32-character minimum, a 15-minute default TTL bounded to 1–60,
+issuer `fastapi-stms`, and audience `fastapi-stms-api`, using the exact setting
+names declared above. Provide typed functions that issue
+an access token for a UUID user ID and validate one into a minimal internal
+claims value. Use aware UTC times and require `sub`, `type=access`, `iat`, `exp`,
+`iss`, and `aud`.
+
+**Explicitly not included:** Do not add a login schema/service/router,
+authentication dependency, database query, refresh token, logout, password
+change, migration, token table, denylist, or custom cryptography.
+
+**Automated tests:** Cover valid creation/validation, UUID subject, fixed token
+type, UTC lifetime, expiration, tampering, malformed input, wrong type, issuer,
+audience, algorithm rejection, missing claims, unsafe/missing secret behavior,
+and secret/token non-disclosure. Tests use controlled time/settings and never
+place complete tokens in parameter IDs or assertion messages.
+
+**Acceptance criteria:**
+
+- Only the selected maintained JWT library and its necessary transitive
+  dependencies are added; unrelated packages are not upgraded deliberately.
+- Valid access claims round-trip; expired, malformed, tampered, or semantically
+  invalid tokens produce one safe internal authentication error.
+- The decoder pins the configured algorithm and validates issuer/audience; it
+  never trusts an unverified header to select an algorithm.
+- Secrets and complete tokens are absent from repr, validation errors, logs,
+  test output, and committed examples.
+- Application import remains connection-free and no migration is created.
+
+**Learning points:** JWT signing versus encryption; registered claim validation;
+secret-aware configuration and algorithm-confusion prevention.
+
+**Verification commands:**
+
+```powershell
+uv sync --all-groups --locked
+uv run pytest tests/test_config.py tests/test_access_tokens.py
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app tests alembic
+uv lock --check
+git diff --check
+```
+
+**Stop boundary:** Stop after token primitives pass unless Tasks 4.1–4.3 were
+explicitly authorized as one milestone. Do not add login or HTTP behavior early.
+
+### Task 4.2 — Login schemas and authentication service
+
+**Goal:** Add secret-safe login request/output contracts and a read-only service
+that verifies existing credentials and issues one access token, without exposing
+HTTP behavior.
+
+**Prerequisites:** Task 4.1 is accepted; token primitives are available; Stage 3
+email normalization, password verification, User repository, and PublicUser
+contracts remain unchanged.
+
+**Files:**
+
+- Add an authentication schema module or the smallest project-consistent schema
+  update for `UserLoginRequest` and `AccessTokenResponse`.
+- Add an authentication/login service module.
+- Add ordinary schema and service tests using controlled repository/token
+  doubles.
+- Update package exports only where the repository already uses them.
+
+**Implementation scope:** Accept exactly `email` and secret-aware `password`;
+the password is non-empty and at most 128 Unicode characters. Canonicalize email
+with the shared helper, preserve password characters without trimming or other
+normalization,
+look up through the caller-owned synchronous Session, verify the stored Argon2id
+hash, and issue one access JWT for the user's UUID. Return exactly
+`access_token` and `token_type="bearer"` through an explicit response schema.
+
+**Explicitly not included:** Do not add the HTTP route/status code, commit or
+roll back a read-only Session, mutate the user, expose PublicUser in the login
+response, issue/store refresh tokens, add a migration, or reveal whether email
+lookup or password verification failed.
+
+**Automated tests:** Cover successful call order, canonical email lookup,
+password preservation until verification, correct UUID passed to token issuing,
+generic failure for missing user/wrong password/malformed stored hash, no token
+issuance on failure, no commit/rollback, and password/hash/token non-disclosure.
+
+**Acceptance criteria:**
+
+- Login input exposes only email/password and uses `SecretStr`; output exposes
+  only access-token/token-type fields.
+- Missing account and wrong password raise the same safe domain exception and
+  present no distinguishable application message.
+- Repository lookup remains exact against canonical email and receives no
+  plaintext password.
+- The service is read-only, contains no FastAPI types, and never commits or
+  rolls back.
+- No refresh-token or current-user behavior appears.
+
+**Learning points:** authentication versus authorization; generic credential
+failure contracts; orchestration with secret-minimized dependency boundaries.
+
+**Verification commands:**
+
+```powershell
+uv run pytest tests/test_auth_schemas.py tests/test_authentication_service.py
+uv run pytest tests/test_security.py tests/test_registration_service.py
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app tests alembic
+uv lock --check
+git diff --check
+```
+
+**Stop boundary:** Stop after connection-free login orchestration passes unless
+the first Stage 4 result milestone is authorized. Do not add an HTTP route or
+Bearer dependency early.
+
+### Task 4.3 — `POST /api/v1/auth/login`
+
+**Goal:** Expose the login service through the existing versioned auth router and
+return a short-lived access token with a stable generic 401 failure contract.
+
+**Prerequisites:** Task 4.2 is accepted; login service/schema behavior is fixed;
+the registration route remains stable.
+
+**Files:**
+
+- Update `app/api/v1/endpoints/auth.py` or split it only if the existing module
+  would otherwise lose clarity.
+- Extend existing strict route/OpenAPI tests and add focused login API tests.
+- Update `tests/test_main.py` only to add the one planned route to its exact
+  route/method allowlist.
+
+**Implementation scope:** Add only `POST /api/v1/auth/login`, inject the existing
+request-scoped synchronous Session, call the login service once, return 200 with
+the explicit access-token response, and translate only the generic invalid-
+credentials domain error to 401 with `WWW-Authenticate: Bearer`.
+
+**Explicitly not included:** Do not decode Bearer tokens, resolve current users,
+add protected routes, issue refresh tokens, set cookies, persist tokens, add
+logout, change passwords, create a migration, or add Stage 5 response fields.
+
+**Automated tests:** Cover 200 and exact response fields, canonicalized request,
+same Session passed to the service, generic 401 for missing account and wrong
+password, Bearer challenge header, 422 secret masking, Session closure, POST-
+only/versioned routing, OpenAPI request/200/401/422 schemas, and unchanged
+registration/health routes.
+
+**Acceptance criteria:**
+
+- Valid credentials return 200 with exactly `access_token` and lowercase
+  `token_type="bearer"`.
+- All invalid credentials use the same non-enumerating 401 body and Bearer
+  challenge without exposing password, hash, token, SQL, or driver diagnostics.
+- OpenAPI contains the new POST route and no refresh/logout/current-user route.
+- Router contains no credential query, password verification, JWT construction,
+  commit, or rollback logic.
+- Stage 3 registration behavior and application import remain unchanged.
+
+**Learning points:** HTTP authentication challenges; Router-to-Service wiring;
+OpenAPI secret and response allowlists.
+
+**Verification commands:**
+
+```powershell
+uv run pytest tests/test_login_api.py tests/test_main.py
+uv run pytest tests/test_registration_api.py tests/test_registration_service.py
+uv run pytest -W always -q
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app tests alembic
+uv lock --check
+git diff --check
+```
+
+**Milestone boundary:** Tasks 4.1–4.3 form the first Stage 4 result milestone.
+Stop after reporting a working access-token login endpoint and all focused/full
+quality evidence. Do not begin token-protected requests before owner approval.
+
+### Task 4.4 — Bearer authentication dependency and current-user resolution
+
+**Goal:** Validate an Authorization Bearer token and resolve its subject to the
+current persisted User through one reusable FastAPI dependency.
+
+**Prerequisites:** The first Stage 4 milestone is accepted; access-token parsing
+and login are stable; no protected product route exists.
+
+**Files:**
+
+- Add `app/api/dependencies.py` if still absent.
+- Extend `UserRepository` with exact UUID lookup.
+- Add dependency and repository contract tests; add PostgreSQL coverage only if
+  required to prove the exact lookup.
+
+**Implementation scope:** Parse Bearer credentials without automatic unsafe
+detail, validate the access token through Task 4.1 primitives, parse `sub` as a
+UUID, look up the user with the supplied synchronous Session, and return the
+mapped User. Every authentication failure produces the same safe 401 response
+and Bearer challenge.
+
+**Explicitly not included:** Do not create a current-user route, authorize
+resource ownership, mutate users, refresh/revoke tokens, add token persistence,
+or commit/rollback a read-only Session.
+
+**Automated tests:** Cover valid resolution, missing/malformed header, wrong
+scheme, expired/tampered/wrong-type token, invalid UUID subject, missing user,
+exact repository UUID predicate, Session closure, no transaction writes, and
+credential/token non-disclosure.
+
+**Acceptance criteria:**
+
+- Valid Bearer input returns the exact current User; all invalid paths return one
+  401 contract with `WWW-Authenticate: Bearer`.
+- Only fully validated claims influence database lookup.
+- Repository UUID lookup has no HTTP/token concerns and no commit/rollback.
+- OpenAPI can reference the Bearer security scheme without implying OAuth2 form
+  login or refresh-token support.
+
+**Learning points:** authentication dependency composition; validated claims to
+database identity; uniform 401 behavior and enumeration resistance.
+
+**Verification commands:**
+
+```powershell
+uv run pytest tests/test_auth_dependencies.py tests/test_user_repository.py
+uv run pytest tests/test_login_api.py tests/test_registration_api.py
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app tests alembic
+uv lock --check
+git diff --check
+```
+
+**Stop boundary:** Stop once current-user resolution is reusable and tested. Do
+not expose `/users/me` or profile mutation yet.
+
+### Task 4.5 — `GET /api/v1/users/me`
+
+**Goal:** Add the first protected endpoint, returning the authenticated user's
+existing public allowlist.
+
+**Prerequisites:** Task 4.4 is accepted and returns a current User; `PublicUser`
+remains the Stage 3 public schema.
+
+**Files:**
+
+- Add the versioned users endpoint/router module and include it in the v1 router.
+- Add focused current-user API/OpenAPI tests.
+- Minimally update the existing strict route allowlist.
+
+**Implementation scope:** Add only `GET /api/v1/users/me`, inject the current-user
+dependency, serialize through `PublicUser`, and document 200/401 plus the Bearer
+security requirement.
+
+**Explicitly not included:** Do not update profile fields, query the database in
+the router, return token claims, add permissions/roles, refresh/logout behavior,
+or create a migration.
+
+**Automated tests:** Cover authenticated 200 with exact fields, absent/invalid
+Bearer 401, dependency override wiring, password/hash/token non-disclosure,
+GET-only/versioned routing, OpenAPI security declaration, and registration/login
+regressions.
+
+**Acceptance criteria:**
+
+- A valid access token returns exactly `id`, `email`, `created_at`, and
+  `updated_at` for its persisted subject.
+- Invalid authentication never enters the endpoint and returns the uniform 401.
+- No public response or OpenAPI schema contains internal User or token fields.
+
+**Learning points:** protected-route dependency injection; ORM-to-public-schema
+serialization; authentication versus resource authorization.
+
+**Verification commands:**
+
+```powershell
+uv run pytest tests/test_current_user_api.py tests/test_auth_dependencies.py
+uv run pytest tests/test_login_api.py tests/test_registration_api.py
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app tests alembic
+uv lock --check
+git diff --check
+```
+
+**Stop boundary:** Stop after current-user read passes. Do not add PATCH behavior
+or any Stage 5 endpoint.
+
+### Task 4.6 — `PATCH /api/v1/users/me` canonical email update
+
+**Goal:** Allow the authenticated user to change only their canonical email with
+service-owned transaction and duplicate-race protection.
+
+**Prerequisites:** Task 4.5 is accepted; current-user dependency, normalization,
+`uq_users_email`, and duplicate-domain behavior are available.
+
+**Files:**
+
+- Add a strict email-only current-user update schema.
+- Add the minimum user-update repository operation and service.
+- Extend the users endpoint with PATCH and add service/API tests.
+- Add a narrow PostgreSQL conflict-path integration test if existing coverage
+  cannot prove the update race.
+
+**Implementation scope:** Accept exactly one email field, canonicalize it, treat
+an unchanged canonical email as an idempotent success, reject another user's
+canonical email with the safe 409 contract, update through the caller-owned
+Session, and let the service commit/rollback. Translate only
+`uq_users_email` races.
+
+**Explicitly not included:** Do not add name/avatar/profile columns, password
+confirmation/change, email verification, account deletion, token revocation,
+refresh/logout, or a migration.
+
+**Automated tests:** Cover normalization, extra/missing-field rejection,
+idempotent same email, successful update/commit, early duplicate, named-
+constraint race/rollback, unrelated integrity errors, authenticated ownership,
+401, 409, exact PublicUser response, and secret/internal-error non-disclosure.
+
+**Acceptance criteria:**
+
+- PATCH changes only the current user's canonical email and returns PublicUser.
+- Service owns one commit/rollback boundary; Repository never commits or raises
+  HTTP errors.
+- Application lookup plus `uq_users_email` preserve uniqueness under races.
+- No schema/migration/token/password behavior changes.
+
+**Learning points:** PATCH allowlists and idempotency; authenticated self-service
+ownership; optimistic checks plus database race defense.
+
+**Verification commands:**
+
+```powershell
+uv run pytest tests/test_current_user_service.py tests/test_current_user_api.py
+uv run pytest tests/test_registration_service.py tests/test_registration_api.py
+uv run pytest -W always -q
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app tests alembic
+uv lock --check
+git diff --check
+```
+
+**Stop boundary:** Stop after the email-only profile update is proven. Do not
+add password changes, token revocation, refresh, or logout.
+
+### Task 4.7 — Real PostgreSQL authentication integration tests
+
+**Goal:** Prove login, Bearer authentication, current-user read, and canonical
+email update through the public API against only `postgres-test`.
+
+**Prerequisites:** Tasks 4.1–4.6 are accepted; no unresolved Stage 4 defect
+remains; the dedicated test database safety guard is active.
+
+**Files:**
+
+- Add narrowly scoped authentication/current-user integration tests and only
+  the fixtures required for per-request synchronous Sessions and exact cleanup.
+- Change production code only for the minimum Stage 4 defect demonstrated by a
+  real test, and report it explicitly.
+
+**Implementation scope:** Exercise real registration/login, Argon2id
+verification, access-token use, persisted-user lookup, current-user read, email
+update, duplicate race behavior, transaction cleanup, and Session closure.
+
+**Explicitly not included:** Do not test or implement refresh tokens, logout,
+password change, token persistence/revocation, Stage 5 tables, or another
+migration.
+
+**Automated tests:** Cover login 200; generic wrong-email/wrong-password 401;
+valid current-user 200; expired/tampered/wrong-claim/unknown-user 401; successful
+canonical email update; duplicate 409; old-email login failure/new-email login
+success; independent Session closure; exact cleanup; and absence of passwords,
+hashes, complete tokens, URLs, credentials, or raw database errors.
+
+**Acceptance criteria:**
+
+- Public HTTP behavior traverses Router -> Service/dependency -> Repository ->
+  synchronous Session -> PostgreSQL.
+- Valid tokens resolve only their UUID subject; invalid tokens and credentials
+  share the documented safe boundaries.
+- Profile changes persist atomically without breaking registration uniqueness.
+- Tests run only against guarded `postgres-test`, leave no rows behind, and do
+  not touch `postgres-dev` or its volume.
+
+**Learning points:** end-to-end authentication proof; token/database identity
+consistency; committed-data cleanup and request Session lifetime.
+
+**Verification commands:**
+
+```powershell
+docker compose up -d --wait postgres-test
+$env:STMS_DATABASE_URL = $env:STMS_TEST_DATABASE_URL
+uv run alembic upgrade head
+Remove-Item Env:STMS_DATABASE_URL
+uv run pytest -m integration tests/integration/test_authentication.py
+uv run pytest -m integration tests/integration
+uv run pytest -W always -q
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app tests alembic
+uv lock --check
+git diff --check
+docker compose stop postgres-test
+```
+
+**Stop boundary:** Stop after real Stage 4 behavior is proven. Do not update
+final documentation or begin Stage 5 before owner approval.
+
+### Task 4.8 — Stage 4 documentation and final authentication verification
+
+**Goal:** Reconcile documentation/OpenAPI with the implemented access-token
+authentication and perform one clean Stage 4 acceptance pass.
+
+**Prerequisites:** Task 4.7 is accepted; production behavior is stable; ordinary
+and integration coverage exists; no Stage 4 defect remains.
+
+**Files:**
+
+- Update `README.md` and only the Stage 4 documentation made necessary by final
+  behavior.
+- Update `.env.example` only for the already implemented non-secret JWT setting
+  names and safe placeholders.
+
+**Implementation scope:** Document login, Bearer usage, current-user GET/PATCH,
+token lifetime/claims, generic 401, email-only update, exact routes, safe local
+configuration, and verification commands. Run the final ordinary, integration,
+OpenAPI, migration-head, quality, and sensitive-diff review.
+
+**Explicitly not included:** Do not modify business behavior, migrations,
+dependencies, Docker topology, or add refresh/logout/password change. A defect
+requiring such a change must become a separate corrective task.
+
+**Automated tests:** Run all ordinary and marked integration tests, warnings,
+OpenAPI disclosure assertions, Ruff, formatting, mypy, lock/diff checks, and
+confirm the existing single migration head has no metadata drift.
+
+**Acceptance criteria:**
+
+- Documentation matches actual login/current-user request, response, 401, and
+  Bearer contracts and explicitly defers every Stage 5 feature.
+- Valid, invalid, expired, and tampered access tokens plus authenticated current-
+  user behavior are proven against real PostgreSQL.
+- OpenAPI and final diff expose no password/hash/secret/complete token/internal
+  error; no real `.env` is tracked.
+- All quality gates pass, only `postgres-test` is stopped afterward, and Stage 4
+  stops for owner confirmation.
+
+**Learning points:** executable authentication documentation; final security
+surface review; stage-level evidence and recoverable Git boundaries.
+
+**Verification commands:**
+
+```powershell
+uv run pytest
+uv run pytest -W always -q
+docker compose up -d --wait postgres-test
+$env:STMS_DATABASE_URL = $env:STMS_TEST_DATABASE_URL
+uv run alembic upgrade head
+uv run alembic current
+uv run alembic heads
+uv run alembic check
+Remove-Item Env:STMS_DATABASE_URL
+uv run pytest -m integration tests/integration
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app tests alembic
+uv lock --check
+git diff --check
+docker compose stop postgres-test
+```
+
+**Stop boundary:** Stop after Stage 4 evidence and final diff are reported. Do
+not commit, push, or begin refresh-token/password-change work without explicit
+owner confirmation.
+
+### Stage 4 completion criteria
+
+- `POST /api/v1/auth/login` issues only a bounded short-lived access JWT for
+  valid credentials and uses one generic 401 contract for invalid credentials.
+- Access-token validation pins the algorithm and validates signature, expiry,
+  type, issuer, audience, and UUID subject before resolving a persisted user.
+- `GET /api/v1/users/me` and email-only `PATCH /api/v1/users/me` operate only on
+  the authenticated user and return the PublicUser allowlist.
+- Synchronous request Sessions close reliably; read paths do not commit;
+  profile-update transactions commit/rollback in the service; repositories
+  never own transactions or HTTP behavior.
+- Ordinary and real PostgreSQL tests prove valid/invalid/expired/tampered token
+  behavior, current-user resolution, canonical email update, duplicate-race
+  safety, and sensitive-data non-disclosure.
+- No refresh token, token storage/rotation/revocation, logout, password change,
+  Stage 5 migration, or later product behavior is present.
+- Ruff, formatting, mypy, lock, migration-head/drift, OpenAPI, and diff checks
+  pass, then the stage stops for owner confirmation.
 
 ### Stage 5 — Refresh, logout, and password change
 

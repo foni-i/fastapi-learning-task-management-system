@@ -20,6 +20,10 @@ SETTINGS_ENVIRONMENT_VARIABLES = (
     "STMS_DEBUG",
     "STMS_API_DOCS_ENABLED",
     "STMS_DATABASE_URL",
+    "STMS_ACCESS_TOKEN_SECRET",
+    "STMS_ACCESS_TOKEN_TTL_MINUTES",
+    "STMS_ACCESS_TOKEN_ISSUER",
+    "STMS_ACCESS_TOKEN_AUDIENCE",
 )
 
 
@@ -50,6 +54,10 @@ def test_settings_use_safe_defaults_without_env_file() -> None:
     assert settings.debug is False
     assert settings.api_docs_enabled is True
     assert settings.database_url is None
+    assert settings.access_token_secret is None
+    assert settings.access_token_ttl_minutes == 15
+    assert settings.access_token_issuer == "fastapi-stms"
+    assert settings.access_token_audience == "fastapi-stms-api"
 
 
 def test_settings_load_prefixed_environment_variables(
@@ -71,6 +79,50 @@ def test_settings_load_prefixed_environment_variables(
     assert settings.api_docs_enabled is False
     assert settings.database_url is not None
     assert settings.database_url.get_secret_value() == VALID_DATABASE_URL
+
+
+def test_access_token_settings_load_secure_typed_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Load secret-aware signing settings through the established prefix."""
+
+    secret = "synthetic-access-token-secret-value"
+    monkeypatch.setenv("STMS_ACCESS_TOKEN_SECRET", secret)
+    monkeypatch.setenv("STMS_ACCESS_TOKEN_TTL_MINUTES", "30")
+    monkeypatch.setenv("STMS_ACCESS_TOKEN_ISSUER", "configured-issuer")
+    monkeypatch.setenv("STMS_ACCESS_TOKEN_AUDIENCE", "configured-audience")
+
+    settings = get_settings()
+
+    assert settings.access_token_secret is not None
+    assert settings.access_token_secret.get_secret_value() == secret
+    assert settings.access_token_ttl_minutes == 30
+    assert settings.access_token_issuer == "configured-issuer"
+    assert settings.access_token_audience == "configured-audience"
+    assert secret not in repr(settings)
+    assert settings.model_dump(mode="json")["access_token_secret"] == "**********"
+
+
+@pytest.mark.parametrize("ttl", [0, 61])
+def test_access_token_ttl_rejects_values_outside_the_short_lived_bound(
+    ttl: int,
+) -> None:
+    """Reject lifetimes outside the explicit 1-60 minute contract."""
+
+    with pytest.raises(ValidationError, match="between 1 and 60 minutes"):
+        Settings.model_validate({"access_token_ttl_minutes": ttl})
+
+
+def test_access_token_secret_rejects_short_value_without_echoing_it() -> None:
+    """Require at least 32 characters and keep rejected material secret."""
+
+    secret = "short-synthetic-secret"
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings.model_validate({"access_token_secret": secret})
+
+    assert "at least 32 characters" in str(exc_info.value)
+    assert secret not in str(exc_info.value)
 
 
 def test_valid_synchronous_postgresql_url_is_accepted() -> None:

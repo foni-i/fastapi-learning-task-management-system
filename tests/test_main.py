@@ -17,8 +17,10 @@ def test_default_application_is_importable_with_basic_metadata() -> None:
     assert set(paths) == {
         "/health/live",
         "/health/ready",
+        "/api/v1/auth/login",
         "/api/v1/auth/register",
     }
+    assert set(paths["/api/v1/auth/login"]) == {"post"}
     assert set(paths["/api/v1/auth/register"]) == {"post"}
 
 

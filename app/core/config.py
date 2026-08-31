@@ -9,6 +9,9 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
 POSTGRESQL_DRIVER = "postgresql+psycopg"
+MIN_ACCESS_TOKEN_SECRET_LENGTH = 32
+MIN_ACCESS_TOKEN_TTL_MINUTES = 1
+MAX_ACCESS_TOKEN_TTL_MINUTES = 60
 
 
 class AppEnvironment(StrEnum):
@@ -35,6 +38,43 @@ class Settings(BaseSettings):
     debug: bool = False
     api_docs_enabled: bool = True
     database_url: SecretStr | None = None
+    access_token_secret: SecretStr | None = None
+    access_token_ttl_minutes: int = 15
+    access_token_issuer: str = "fastapi-stms"
+    access_token_audience: str = "fastapi-stms-api"
+
+    @field_validator("access_token_secret")
+    @classmethod
+    def validate_access_token_secret(
+        cls,
+        value: SecretStr | None,
+    ) -> SecretStr | None:
+        """Require strong configured signing material without exposing it."""
+
+        if (
+            value is not None
+            and len(value.get_secret_value()) < MIN_ACCESS_TOKEN_SECRET_LENGTH
+        ):
+            raise ValueError("access token secret must contain at least 32 characters")
+        return value
+
+    @field_validator("access_token_ttl_minutes")
+    @classmethod
+    def validate_access_token_ttl(cls, value: int) -> int:
+        """Keep short-lived access tokens within the accepted Stage 4 bound."""
+
+        if not MIN_ACCESS_TOKEN_TTL_MINUTES <= value <= MAX_ACCESS_TOKEN_TTL_MINUTES:
+            raise ValueError("access token TTL must be between 1 and 60 minutes")
+        return value
+
+    @field_validator("access_token_issuer", "access_token_audience")
+    @classmethod
+    def validate_access_token_identity(cls, value: str) -> str:
+        """Reject empty issuer or audience values without silently rewriting them."""
+
+        if not value.strip():
+            raise ValueError("access token issuer and audience must not be blank")
+        return value
 
     @field_validator("database_url")
     @classmethod

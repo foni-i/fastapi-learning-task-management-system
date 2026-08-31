@@ -1920,16 +1920,514 @@ OAuth providers, or administrator behavior.
 Implement only project behavior required by the Agent MVP. Every query is scoped
 by authenticated user ID; clients and models never supply ownership.
 
-- **Task 6.1:** Project decisions, ORM model, constraints, and reversible migration.
-- **Task 6.2:** Strict create/update/public/list schemas and date validation.
-- **Task 6.3:** Owned Repository queries and Service transaction contracts.
-- **Task 6.4:** `POST /api/v1/projects` with exact public response.
-- **Task 6.5:** Owned project detail and deterministic paginated list.
-- **Task 6.6:** Project update and idempotent archive action.
-- **Task 6.7:** PostgreSQL ownership/constraint integration and documentation.
+This stage retains the synchronous `Router -> Service -> Repository ->
+SQLAlchemy` path established by authentication. The Bearer dependency supplies
+the persisted current User; an HTTP client and a future Agent tool cannot send or
+override project ownership. Missing and foreign-owned projects intentionally
+share one safe 404 response.
 
-Do not add collaboration, sharing, teams, roles, or model-facing tools. Hard
-delete is deferred unless a later accepted requirement makes it necessary.
+#### Stage 6 fixed project contract
+
+The requirements establish the field set and four statuses. The following
+bounds and API choices are **Stage 6 planning decisions**, added here because the
+earlier documents deliberately did not choose them:
+
+- `id` and internal `user_id` are PostgreSQL UUIDs. `id` uses the existing
+  `gen_random_uuid()` server default; `user_id` is a required foreign key to
+  `users.id` and is derived only from authenticated context.
+- `name` is a required trimmed string of 1–200 Unicode characters. Whitespace-
+  only input is invalid. `description` is nullable, trimmed when supplied, and
+  bounded to 2,000 characters; an empty or whitespace-only description becomes
+  `None`.
+- `start_date` and `target_date` are nullable SQL/Python calendar dates. When
+  both are present, `target_date >= start_date`. Clearing either date removes the
+  comparison until both are present again; no timezone conversion applies to a
+  calendar date.
+- `status` is stored as a non-null `VARCHAR(20)` protected by a named database
+  check and represented publicly by a string `ProjectStatus` enum with exactly
+  `NOT_STARTED`, `IN_PROGRESS`, `COMPLETED`, and `ARCHIVED`. The server default
+  is `NOT_STARTED`; create input cannot override it.
+- Ordinary PATCH may set `NOT_STARTED`, `IN_PROGRESS`, or `COMPLETED` and may
+  change any editable non-ownership field. It cannot set `ARCHIVED`; archiving
+  uses `POST /api/v1/projects/{project_id}/archive`. Repeating archive returns
+  200 with the same public project and performs no write or commit. Stage 6 does
+  not restore archived projects, and other PATCH operations on one return 409
+  `Archived project cannot be modified`.
+- Lists exclude archived projects by default. `include_archived=true` includes
+  every status. Pagination is `page=1` and `page_size=20`, with minimum 1 and
+  maximum page size 100. Ordering is fixed to `created_at DESC, id DESC`; no
+  arbitrary sort or search parameter is accepted in this stage.
+- Public project fields are `id`, `name`, `description`, `start_date`,
+  `target_date`, `status`, `created_at`, and `updated_at`. Internal `user_id` is
+  persisted and used for every authorization predicate but is excluded from
+  create/update input, public responses, and future model-controlled tool input.
+- PATCH distinguishes missing from explicit null. `description`, `start_date`,
+  and `target_date` may be cleared with null; `name` and `status` may not. An
+  empty object is rejected with 422. Cross-field validation combines supplied
+  changes with the persisted project before a write.
+- The project-specific missing response is HTTP 404 with the fixed safe detail
+  `Project does not exist`. Stage 6 keeps the existing route-local `detail`
+  response style and does not retrofit the planned cross-application error
+  envelope into accepted Stage 1–4 APIs. Date/input errors remain 422; only an
+  attempted normal update of an archived project uses the Stage 6 409 above.
+- Actual mutations advance `updated_at` with an aware UTC value. Idempotent
+  archive and no-op PATCH return without changing it or opening a write
+  transaction. `created_at` never changes.
+
+Task 6.1 creates every database invariant listed here in one migration. Later
+Stage 6 tasks must not create a second project migration unless a separately
+accepted defect proves that the fixed schema itself is wrong.
+
+### Task 6.1 — Project decisions, ORM model, constraints, and reversible migration
+
+**Estimated time:** 1–2 focused hours. **Real PostgreSQL:** required for migration
+round-trip and structure inspection.
+
+**Goal:** Add only the foundational Project ORM mapping and one reversible
+migration, with the complete Stage 6 storage contract but no API behavior.
+
+**Prerequisites:** Stage 4 is accepted and committed; the worktree is clean;
+`9f3b2d6e8a41` is the single Alembic head; no Project model, table, or migration
+exists.
+
+**Files:** Add `app/models/project.py`, update `app/models/__init__.py` and
+Alembic metadata discovery only as required by the repository's existing import
+pattern, add exactly one revision under `alembic/versions/`, and add focused
+model/migration tests. Do not create a schema, repository, service, or router.
+
+**Implementation scope:** Map only `id`, `user_id`, `name`, `description`,
+`start_date`, `target_date`, `status`, `created_at`, and `updated_at`. Use UUID,
+bounded strings, SQL `date`, timezone-aware timestamps, and the fixed status
+values above. The migration's `down_revision` is `9f3b2d6e8a41` and creates:
+
+- primary key `pk_projects` on `id`, with server default `gen_random_uuid()`;
+- foreign key `fk_projects_user_id_users` from `user_id` to `users.id`, with
+  restrictive/no-cascade delete behavior;
+- check `ck_projects_name_not_blank` using trimmed database text;
+- check `ck_projects_status` allowing only the four exact stored values;
+- check `ck_projects_target_date_not_before_start_date`, which passes when
+  either date is null and otherwise requires target on/after start;
+- index `ix_projects_user_id` for the mandatory ownership predicate.
+
+`status` has server default `NOT_STARTED`; timestamps use `CURRENT_TIMESTAMP`.
+The migration downgrade drops the projects table and its owned objects only.
+
+**Explicitly not included:** No Pydantic schemas, validation functions,
+Repository, Service, endpoint, pagination, Task relation, hard delete,
+refresh-token table, Agent table, second migration, or modification of any
+accepted revision.
+
+**Automated tests:** Prove the exact metadata table/column set, UUID/defaults,
+nullable fields, bounded strings, date/timestamp types, named PK/FK/checks/index,
+status default, and metadata discovery. Against PostgreSQL, upgrade from
+`9f3b2d6e8a41`, inspect the table and constraints, downgrade to that revision and
+confirm `projects` is removed while `users` remains, then re-upgrade.
+
+**Acceptance criteria:** ORM and migration match exactly; there is one new head
+and one new revision; `alembic current` reaches it; downgrade/re-upgrade is
+reversible; `alembic check` reports no drift; Stage 4 behavior remains green.
+
+**Learning points:** ORM metadata versus DDL; named FK/check/index contracts;
+nullable cross-field checks under PostgreSQL three-valued logic.
+
+**Verification commands:**
+
+```powershell
+uv run pytest tests/test_project_model.py
+docker compose up -d --wait postgres-test
+$env:STMS_DATABASE_URL = $env:STMS_TEST_DATABASE_URL
+uv run alembic upgrade head
+uv run alembic downgrade 9f3b2d6e8a41
+uv run alembic upgrade head
+uv run alembic current
+uv run alembic heads
+uv run alembic check
+Remove-Item Env:STMS_DATABASE_URL
+uv run pytest -m integration tests/integration/test_project_migration.py
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app tests alembic
+uv lock --check
+git diff --check
+docker compose stop postgres-test
+```
+
+**Stop boundary:** Stop with the Project table and reversible migration only. Do
+not begin Task 6.2 or create a second revision.
+
+### Task 6.2 — Strict create/update/public/list schemas and date validation
+
+**Estimated time:** 1–2 focused hours. **Real PostgreSQL:** not required.
+
+**Goal:** Define connection-free Pydantic 2 contracts for project creation,
+partial update, public output, and deterministic pagination.
+
+**Prerequisites:** Task 6.1 is accepted; Project fields/statuses are fixed; the
+model and migration remain unchanged.
+
+**Files:** Add `app/schemas/project.py`, update schema exports only if the current
+package style requires them, and add `tests/test_project_schemas.py`.
+
+**Implementation scope:** Add one shared `ProjectStatus` in the smallest layer
+that avoids Schema/Model circular imports, plus `ProjectCreate`,
+`ProjectUpdate`, `PublicProject`, and `ProjectListResponse`. `ProjectCreate`
+accepts only name, description, start_date, and target_date. `ProjectUpdate`
+accepts optional editable fields plus a non-archived status and retains
+`model_fields_set` so Services can distinguish missing from null. All request
+schemas use `extra="forbid"` and safe validation messages. `PublicProject` uses
+`from_attributes`, validates aware timestamps, normalizes them to UTC, and omits
+`user_id`. The list response contains exactly `items`, `page`, `page_size`,
+`total`, and `pages`.
+
+Schema validation trims/bounds text, maps blank optional description to `None`,
+checks create-time date order, rejects direct `ARCHIVED`, and rejects empty
+PATCH. Update validation that depends on persisted values is intentionally
+exposed as a pure helper/Service rule rather than faked from partial input.
+
+**Explicitly not included:** No database access, ownership lookup, transaction,
+Repository, Service orchestration, Router, pagination query, Agent schema, or
+change to ORM/migration.
+
+**Automated tests:** Cover every length boundary, whitespace behavior, nullable
+and missing update fields, empty PATCH, extra ownership/internal fields, all
+allowed statuses, direct archive rejection, create-time and combined-date helper
+rules, exact public/list field sets, ORM-style attribute serialization, UTC
+timestamps, and absence of `user_id` or internal fields.
+
+**Acceptance criteria:** Every input/output allowlist is exact; name 1/200 passes
+and 0/201 fails; description null/2,000 passes and 2,001 fails; partial update
+semantics are observable; list metadata is bounded and internally consistent;
+tests need no database or network.
+
+**Learning points:** create versus partial-update schemas; missing versus null in
+Pydantic 2; validation that needs persisted state.
+
+**Verification commands:**
+
+```powershell
+uv run pytest tests/test_project_schemas.py
+uv run pytest tests/test_user_schemas.py tests/test_auth_schemas.py
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app tests alembic
+uv lock --check
+git diff --check
+```
+
+**Stop boundary:** Stop after connection-free Project schemas and validation
+tests. Do not create persistence or HTTP behavior.
+
+### Task 6.3 — Owned Repository queries and Service transaction contracts
+
+**Estimated time:** 1–2 focused hours. **Real PostgreSQL:** not required; real
+query/isolation proof belongs to Task 6.7.
+
+**Goal:** Implement the reusable owned Project application core that HTTP and
+future Agent tools can call without bypassing authorization or transactions.
+
+**Prerequisites:** Tasks 6.1–6.2 are accepted; current-user identity and Project
+schemas are stable; no Project route exists.
+
+**Files:** Add `app/repositories/projects.py`, `app/services/projects.py`, focused
+Repository query-contract tests, and `tests/test_project_service.py`. Add a safe
+Project-not-found domain exception and archived-project conflict only in the
+existing core exception location; do not add HTTP types there.
+
+**Implementation scope:** `ProjectRepository` receives a caller-owned synchronous
+Session and provides:
+
+- `create(user_id, ...)`, using only service-derived ownership, `add`, and
+  `flush`;
+- `get_owned_by_id(project_id, user_id)`, whose SQL predicate contains both IDs;
+- `list_owned(user_id, page, page_size, include_archived)` using fixed
+  `created_at DESC, id DESC` and `offset/limit`;
+- `count_owned(user_id, include_archived)` with the same ownership/archive
+  predicate;
+- the narrow mutation/flush operation needed for update/archive.
+
+Service functions implement create, owned detail, owned list, update, and
+archive. They receive the trusted current User or its UUID outside request data,
+convert ORM values to public schemas, combine PATCH fields with persisted dates,
+and own commit/rollback for actual writes. Missing and foreign-owned repository
+results raise the same safe Project-not-found domain error. List/detail are
+read-only and never commit. Empty/no-op PATCH and repeat archive do not write or
+commit. Actual update/archive sets `updated_at` from an injectable aware-UTC
+clock. Unexpected exceptions roll back and propagate.
+
+**Explicitly not included:** No FastAPI imports, status codes, Router, HTTP error
+mapping, real PostgreSQL test, hard delete, restore, Task relationship, Agent
+Tool, generic base repository, unit-of-work framework, or AsyncSession.
+
+**Automated tests:** Prove both-ID predicates, owner-scoped list/count parity,
+fixed ordering, create ownership derivation, public allowlists, commit on actual
+writes, rollback on failure, no commit on reads/no-op/idempotent archive,
+persisted-state date validation, archived update conflict, missing/foreign
+indistinguishability, and absence of HTTP concepts in Repository/Service.
+
+**Acceptance criteria:** No method accepts a client `user_id`; every owned query
+contains trusted ownership; Repository never commits/rolls back; Service owns all
+write outcomes; read paths and no-ops stay transaction-neutral; current Stage 4
+tests remain green.
+
+**Learning points:** defense-in-depth ownership predicates; read versus write
+transaction boundaries; deterministic pagination queries and count parity.
+
+**Verification commands:**
+
+```powershell
+uv run pytest tests/test_project_repository.py tests/test_project_service.py
+uv run pytest tests/test_auth_dependencies.py tests/test_current_user_service.py
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app tests alembic
+uv lock --check
+git diff --check
+```
+
+**Milestone boundary:** Tasks 6.1–6.3 form the first Stage 6 result milestone: a
+migrated, schema-validated, ownership-safe Project core with no public Project
+route. Stop for review; do not begin Task 6.4 without approval.
+
+### Task 6.4 — `POST /api/v1/projects` with exact public response
+
+**Estimated time:** 1–2 focused hours. **Real PostgreSQL:** not required in this
+task; API wiring uses controlled dependencies and Task 6.7 proves persistence.
+
+**Goal:** Expose authenticated project creation through one versioned endpoint.
+
+**Prerequisites:** Task 6.3 is accepted; create Service/schema behavior is fixed;
+the worktree is clean.
+
+**Files:** Add the project endpoint/router module under the existing v1 layout,
+include it in `app/api/v1/router.py`, minimally update the strict route allowlist,
+and add `tests/test_project_api.py` focused on create behavior/OpenAPI.
+
+**Implementation scope:** Add only `POST /api/v1/projects`. Inject the existing
+Bearer current User and the same request-scoped synchronous Session, call the
+create Service once, and return 201 with `PublicProject`. Router request data
+contains no `user_id`; Router contains no SQL, date business logic, or commit.
+
+**Explicitly not included:** No list/detail/update/archive route, Project hard
+delete, Task behavior, Agent Tool, new dependency, or migration.
+
+**Automated tests:** Cover authenticated 201, exact request/response fields,
+canonical text/date behavior, current User and same Session passed to Service,
+401 challenge, 422 extra/internal/date input, Session closure, POST-only
+versioning, OpenAPI schemas/security, and unchanged Stage 4 routes.
+
+**Acceptance criteria:** Creation is one thin Router-to-Service call; response
+omits `user_id`; OpenAPI adds only the planned POST path/method and exact
+201/401/422 contract; health/registration/login/current-user remain compatible.
+
+**Learning points:** authenticated ownership injection; 201 response allowlists;
+strict OpenAPI route regression tests.
+
+**Verification commands:**
+
+```powershell
+uv run pytest tests/test_project_api.py tests/test_main.py
+uv run pytest tests/test_login_api.py tests/test_current_user_api.py
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app tests alembic
+uv lock --check
+git diff --check
+```
+
+**Stop boundary:** Stop after authenticated Project creation. Do not expose
+read/update/archive endpoints early.
+
+### Task 6.5 — Owned project detail and deterministic paginated list
+
+**Estimated time:** 1–2 focused hours. **Real PostgreSQL:** not required here;
+Task 6.7 proves cross-user and query behavior against PostgreSQL.
+
+**Goal:** Add ownership-safe Project detail and fixed paginated listing through
+the existing Project Router.
+
+**Prerequisites:** Task 6.4 is accepted; owned Repository/Service read contracts
+and pagination response are stable.
+
+**Files:** Extend the project endpoint and focused API tests; update shared error
+response schemas only if the existing route style requires an explicit safe 404
+model. Do not create a second Project service or router.
+
+**Implementation scope:** Add `GET /api/v1/projects/{project_id}` returning
+`PublicProject`, and `GET /api/v1/projects` with only `page`, `page_size`, and
+`include_archived`. Map the Project-not-found domain error to 404 detail
+`Project does not exist`. Both routes inject current User and the request Session,
+delegate to Service, and never commit.
+
+List response contains exactly `items`, `page`, `page_size`, `total`, and
+`pages`; pages is zero when total is zero and otherwise ceiling(total/page_size).
+The fixed order and archived behavior come from the Repository contract, not
+client-controlled sort expressions.
+
+**Explicitly not included:** No PATCH/archive/delete, status/name/date filters,
+arbitrary sort, full-text search, cursor pagination, cross-user admin view, Task
+embedding, or Agent Tool.
+
+**Automated tests:** Cover owned detail 200, missing and foreign-owned identical
+404, list parameter defaults/bounds, empty/non-empty page metadata, deterministic
+Service output, include-archived forwarding, 401, malformed UUID 422, Session
+closure, GET-only methods, OpenAPI and route allowlist compatibility.
+
+**Acceptance criteria:** A user receives only owned projects; no error reveals a
+foreign record; list shape/order parameters are fixed and bounded; read routes
+perform no commit/rollback; no unplanned query parameter appears in OpenAPI.
+
+**Learning points:** resource enumeration resistance; offset pagination metadata;
+fixed sorting as an API contract.
+
+**Verification commands:**
+
+```powershell
+uv run pytest tests/test_project_api.py tests/test_project_service.py
+uv run pytest tests/test_auth_dependencies.py tests/test_main.py
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app tests alembic
+uv lock --check
+git diff --check
+```
+
+**Stop boundary:** Stop with create/detail/list only. Do not implement mutation or
+archive behavior.
+
+### Task 6.6 — Project update and idempotent archive action
+
+**Estimated time:** 1–2 focused hours. **Real PostgreSQL:** not required here;
+Task 6.7 proves committed behavior and database constraints.
+
+**Goal:** Complete the Stage 6 HTTP surface with strict partial update and a
+dedicated idempotent archive action.
+
+**Prerequisites:** Task 6.5 is accepted; Service update/archive contracts are
+stable; no hard-delete route exists.
+
+**Files:** Extend the existing Project endpoint and its focused tests. Add only
+the narrow response model/error mapping needed for the fixed 404/409 contracts.
+
+**Implementation scope:** Add `PATCH /api/v1/projects/{project_id}` and
+`POST /api/v1/projects/{project_id}/archive`. PATCH delegates missing-versus-null
+and persisted-date validation to the Service, returns 200 `PublicProject`, maps
+missing/foreign to the same 404, and maps only archived mutation conflict to 409
+`Archived project cannot be modified`. Archive returns 200; the first call
+commits and advances `updated_at`, while repeated archive returns the unchanged
+public value without a write or commit. No route can restore archived state.
+
+**Explicitly not included:** No DELETE, unarchive/restore, bulk operation,
+optimistic-lock version field, Task cascade, Agent approval, or Stage 7 behavior.
+
+**Automated tests:** Cover each editable field, explicit nullable clears,
+missing-field preservation, empty/extra/internal PATCH 422, combined stored date
+failure, allowed status changes, direct ARCHIVED rejection, owned success,
+missing/foreign 404, archived update 409, first/repeat archive, commit/rollback/
+no-op behavior, exact public response, Bearer 401, OpenAPI and route allowlist.
+
+**Acceptance criteria:** Update cannot change ownership/identity/timestamps
+directly; cross-field rules use the final combined state; failure rolls back;
+idempotent operations do not produce extra writes; there is still no Project
+hard-delete or restore endpoint.
+
+**Learning points:** PATCH missing/null semantics; state-action endpoints and
+idempotency; safe domain-to-HTTP error mapping.
+
+**Verification commands:**
+
+```powershell
+uv run pytest tests/test_project_api.py tests/test_project_service.py
+uv run pytest tests/test_main.py tests/test_current_user_api.py
+uv run pytest -W always -q
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app tests alembic
+uv lock --check
+git diff --check
+```
+
+**Milestone boundary:** Tasks 6.4–6.6 form the second Stage 6 result milestone:
+the complete authenticated Project HTTP API. Stop for review before real database
+acceptance and documentation.
+
+### Task 6.7 — PostgreSQL ownership/constraint integration and documentation
+
+**Estimated time:** 1–2 focused hours. **Real PostgreSQL:** required.
+
+**Goal:** Prove the complete Project API, ownership isolation, transaction
+behavior, migration state, and documentation against only `postgres-test`.
+
+**Prerequisites:** Tasks 6.1–6.6 are accepted; production behavior is stable;
+ordinary coverage exists; no unresolved Project defect remains.
+
+**Files:** Add narrowly scoped Project integration tests and exact-cleanup
+fixtures under `tests/integration/`; update README and only Stage 6 documentation
+made necessary by the accepted behavior. Modify production code only for a
+minimal Stage 6 defect proven by a real test, and report it separately.
+
+**Implementation scope:** Through public Bearer-protected HTTP routes and
+independent synchronous request Sessions, prove create, detail, list, update,
+archive, idempotent repeat, persistence, fixed ordering/pagination, archived
+visibility, named database constraints, missing/foreign 404 equivalence, and
+transaction cleanup. Use at least two real users and exact UUID-based cleanup;
+never assert the entire projects/users tables are empty.
+
+Perform a clean Project migration round trip from the pre-Stage-6 head
+`9f3b2d6e8a41` to the Stage 6 head, downgrade to `9f3b2d6e8a41`, and re-upgrade.
+Confirm `projects` disappears on downgrade while `users` remains, then confirm
+all Project constraints/indexes return and `alembic check` has no drift.
+
+**Explicitly not included:** No hard delete, Task table/API, Stage 5 refresh
+work, Agent Tool, LangGraph, LLM SDK, new dependency, second Project migration,
+`postgres-dev` operation, or volume deletion.
+
+**Automated tests:** Cover two-user isolation for detail/list/update/archive;
+client ownership-field rejection; successful create/persistence; date and status
+database defenses; exact list order/page totals; default archived exclusion and
+explicit inclusion; update commit/rollback; idempotent archive; Session closure;
+secret/Token/SQL non-disclosure; migration upgrade/downgrade/re-upgrade.
+
+**Acceptance criteria:** Every public Project operation traverses Router ->
+Service -> owned Repository -> synchronous Session -> PostgreSQL; user A never
+observes or mutates user B data; all public/error allowlists are stable; committed
+test rows are precisely removed; ordinary/integration/quality gates pass; only
+`postgres-test` is stopped afterward.
+
+**Learning points:** end-to-end tenant isolation; schema/service/database
+invariant layering; recoverable stage acceptance with committed-data cleanup.
+
+**Verification commands:**
+
+```powershell
+uv run pytest
+uv run pytest -W always -q
+docker compose up -d --wait --force-recreate postgres-test
+$env:STMS_DATABASE_URL = $env:STMS_TEST_DATABASE_URL
+uv run alembic upgrade head
+uv run alembic downgrade 9f3b2d6e8a41
+uv run alembic upgrade head
+uv run alembic current
+uv run alembic heads
+uv run alembic check
+Remove-Item Env:STMS_DATABASE_URL
+uv run pytest -m integration tests/integration/test_projects.py
+uv run pytest -m integration tests/integration
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app tests alembic
+uv lock --check
+git diff --check
+docker compose stop postgres-test
+```
+
+**Stage boundary:** Task 6.7 is the third result milestone and completes Stage 6.
+Stop for owner confirmation. Do not begin Stage 7 Task models or Stage 8 Agent
+work.
+
+Do not add collaboration, sharing, teams, roles, model-facing tools, hard delete,
+or restore during Stage 6. The next accepted domain stage is Stage 7 only after
+the owner can explain Project ownership, pagination, transaction, and migration
+behavior.
 
 ### Stage 7 — Agent-ready task core
 

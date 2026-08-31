@@ -1,8 +1,8 @@
 # FastAPI STMS
 
-FastAPI STMS 是一个分阶段构建的学习项目。当前已完成 Stage 1 应用骨架、Stage 2 PostgreSQL/迁移基础设施，以及 Stage 3 用户注册。注册链路使用 FastAPI、Pydantic 2、SQLAlchemy 2 同步 Session、PostgreSQL、Alembic 和 Argon2id，并有真实 PostgreSQL 端到端测试。
+FastAPI STMS 是 StudyFlow Agent 的分阶段后端学习项目。当前已完成 Stage 1 应用骨架、Stage 2 PostgreSQL/迁移基础设施、Stage 3 用户注册，以及 Stage 4 短期 Access Token 登录和当前用户能力。认证链路使用 FastAPI、Pydantic 2、SQLAlchemy 2 同步 Session、PostgreSQL、Alembic、Argon2id 和固定 HS256 JWT，并有真实 PostgreSQL 端到端测试。
 
-当前只实现用户注册，尚未实现登录、JWT、Access Token、Refresh Token、退出登录、当前用户、用户资料修改、管理员、密码找回、项目、任务或 CI。不要把当前仓库当作完整的任务管理系统。
+当前尚未实现 Refresh Token、Token 持久化/轮换/撤销、退出登录、密码修改、管理员、密码找回、项目、任务或 Agent 功能。LangGraph、LLM 调用、Agent Tools、RAG、Checkpoint、HITL、Streaming、MCP 和多 Agent 都只是后续路线，不应把当前仓库描述成已经完成的 Agent 系统。
 
 ## 前置条件
 
@@ -12,7 +12,7 @@ FastAPI STMS 是一个分阶段构建的学习项目。当前已完成 Stage 1 �
 - `uv`；项目所需的 Python 3.14 由 `uv` 管理
 - Docker Desktop，并启用 WSL 2 Linux 容器后端
 
-导入应用、查看 OpenAPI 和调用 liveness 不需要 PostgreSQL；注册、readiness、迁移和数据库 integration 测试需要 PostgreSQL。
+导入应用、查看 OpenAPI 和调用 liveness 不需要 PostgreSQL；注册、登录、当前用户、readiness、迁移和数据库 integration 测试需要 PostgreSQL。登录和 Bearer Token 操作还要求配置安全的 Access Token secret。
 
 ## 安装 uv
 
@@ -59,11 +59,12 @@ Copy-Item .env.example .env
 
 - `.env.example` 只包含安全的示例值，可以提交到 Git。
 - `.env` 属于本机配置，可能含有密钥，绝对不得提交。
-- 当前示例支持运行环境、调试模式、API 文档开关，以及本地开发/测试 PostgreSQL 服务配置。
+- 当前示例支持运行环境、调试模式、API 文档开关、Access Token，以及本地开发/测试 PostgreSQL 服务配置。
 - 数据库 URL 和密码只能来自环境变量或未提交的 `.env`；不要放入 README、`alembic.ini`、源码、日志或测试输出。
 - `STMS_DATABASE_URL` 是应用和 Alembic 使用的数据库 URL；`STMS_TEST_DATABASE_URL` 只允许 integration 测试使用专用测试库。
+- `STMS_ACCESS_TOKEN_SECRET` 没有应用默认值，必须在本机提供至少 32 个字符的随机 secret；不要使用或提交 `.env.example` 中的占位文本作为真实密钥。
 
-没有 `.env` 时，应用也能使用安全的开发默认值启动。
+没有 `.env` 时，应用仍能以安全默认值启动并提供无 Token 路径，但登录签发和 Bearer 校验不会使用不安全的默认 secret。
 
 ## SQLAlchemy 数据库基础设施
 
@@ -71,7 +72,7 @@ Copy-Item .env.example .env
 
 - `Base`（`app/db/base.py`）提供共享 declarative metadata；Stage 3 的 `User` ORM 映射到 `users` 表。
 - `Engine`（`app/db/session.py`）管理连接池和数据库方言。它按进程缓存、同步运行，并配置有限的连接超时；创建 Engine 不会立即连接，首次 `connect()` 或 Session 执行 SQL 时才访问 PostgreSQL。
-- `sessionmaker` 绑定上述 Engine，用于创建短生命周期的同步 `Session`。`get_session()` 每个请求 yield 一个 Session，并在 `finally` 中关闭；注册 Service 拥有 `commit`/`rollback`，Repository 只查询、`add` 和 `flush`。
+- `sessionmaker` 绑定上述 Engine，用于创建短生命周期的同步 `Session`。`get_session()` 每个请求 yield 一个 Session，并在 `finally` 中关闭；注册和当前用户写 Service 拥有 `commit`/`rollback`，Repository 只查询、`add`、修改和 `flush`。登录及当前用户读取不提交事务。
 - readiness 探针使用短生命周期 `Connection` 执行 `SELECT 1`，通过上下文管理器在成功或查询异常时归还连接池。它不创建 Session，也不修改数据。
 
 ## PostgreSQL 开发与测试环境
@@ -216,15 +217,18 @@ curl.exe -i http://127.0.0.1:8000/health/ready
 
 如果将 `STMS_API_DOCS_ENABLED` 设为 `false`，上述两个文档入口会被关闭。
 
-## 用户注册
+## 认证与当前用户 API
 
-Stage 3 公开以下路由，且不应出现其他产品路由：
+Stage 4 完成后公开以下六个方法/路径组合，且不应出现其他产品路由：
 
 | 方法 | 路径 | 结果 |
 | --- | --- | --- |
 | `GET` | `/health/live` | 应用进程存活状态 |
 | `GET` | `/health/ready` | 数据库就绪状态 |
 | `POST` | `/api/v1/auth/register` | 创建最小用户并返回公开字段 |
+| `POST` | `/api/v1/auth/login` | 验证凭据并签发短期 Access Token |
+| `GET` | `/api/v1/users/me` | 返回已认证用户的公开字段 |
+| `PATCH` | `/api/v1/users/me` | 只更新已认证用户的规范化邮箱 |
 
 ### 注册请求
 
@@ -305,7 +309,116 @@ POST /api/v1/auth/register
 - 请求依赖在响应路径结束后关闭 Session。
 - 应用层提前查询提供常规重复邮箱错误；并发请求都通过早期查询时，`uq_users_email` 是最终防线。真实双 Session 测试证明同一规范化邮箱只能一个请求返回 201，另一个返回安全 409。
 
-登录、JWT、Access Token、Refresh Token、退出登录和当前用户功能属于后续阶段，当前均不可用。
+### 登录与Access Token
+
+`POST /api/v1/auth/login` 的请求体严格只允许 `email` 和 `password`。邮箱复用注册时的规范化规则；密码保存在 `SecretStr` 边界内，不 trim、不截断、不 casefold，也不修改大小写。登录只限制密码为 1～128 个 Unicode 字符以约束认证工作量，不重新应用注册时的 12 字符最小长度规则。
+
+```powershell
+$loginBody = @{
+    email = "learner@example.com"
+    password = "<local-example-password>"
+} | ConvertTo-Json
+
+$login = Invoke-RestMethod `
+    -Method Post `
+    -Uri http://127.0.0.1:8000/api/v1/auth/login `
+    -ContentType "application/json" `
+    -Body $loginBody
+```
+
+成功返回 HTTP 200，响应字段严格为：
+
+```json
+{
+  "access_token": "<access-token>",
+  "token_type": "bearer"
+}
+```
+
+不存在的邮箱和错误密码使用完全相同的 HTTP 401：
+
+```json
+{
+  "detail": "Invalid email or password"
+}
+```
+
+响应同时包含 `WWW-Authenticate: Bearer`，不会透露账号是否存在，也不会返回密码、hash、SQL 或数据库异常。
+
+Access Token 契约如下：
+
+- 算法固定为应用选择的 `HS256`，不会根据未验证的 Token header 选择算法。
+- `STMS_ACCESS_TOKEN_SECRET` 无默认值且至少 32 个字符；默认 TTL 为 15 分钟，允许范围为 1～60 分钟。
+- issuer 默认 `fastapi-stms`，audience 默认 `fastapi-stms-api`。
+- 必需 claims 为 `sub`、`type`、`iat`、`exp`、`iss` 和 `aud`；`sub` 是用户 UUID 文本，`type` 必须为 `access`。
+- 校验固定算法、签名、过期时间、type、issuer、audience 和 UUID subject 后，Token 才能影响数据库查询。
+- Access Token 不存入数据库。当前没有主动撤销或 denylist，只能依靠短有效期到期；Refresh Token、轮换和撤销属于延后认证增强。
+
+### Bearer当前用户
+
+受保护请求使用明显的占位 Token，不要把真实 Token 写入文档、源码或日志：
+
+```powershell
+$headers = @{ Authorization = "Bearer <access-token>" }
+Invoke-RestMethod `
+    -Method Get `
+    -Uri http://127.0.0.1:8000/api/v1/users/me `
+    -Headers $headers
+```
+
+`GET /api/v1/users/me` 成功返回 HTTP 200，字段白名单严格为 `id`、`email`、`created_at` 和 `updated_at`。它不返回密码、`password_hash`、Token 或内部 claims。
+
+缺失、格式错误、篡改、过期、错误 type/issuer/audience、非法 UUID subject 或数据库中不存在的用户均返回同一个 HTTP 401 和 Bearer challenge：
+
+```json
+{
+  "detail": "Could not validate credentials"
+}
+```
+
+Bearer dependency 先完整验证 Token，再通过同步 Session 和 Repository 按 UUID 查询用户。Token 中不存在客户端可覆盖的用户资料或权限字段。
+
+### 当前用户邮箱更新
+
+`PATCH /api/v1/users/me` 请求体严格只允许 `email`：
+
+```powershell
+$updateBody = @{ email = "  Updated@EXAMPLE.COM " } | ConvertTo-Json
+Invoke-RestMethod `
+    -Method Patch `
+    -Uri http://127.0.0.1:8000/api/v1/users/me `
+    -Headers $headers `
+    -ContentType "application/json" `
+    -Body $updateBody
+```
+
+- `password`、`user_id` 和其他资料字段均被拒绝。
+- 邮箱复用 Stage 3 规范化规则；相同规范化邮箱是幂等 HTTP 200，不查询、不写入，也不提交事务。
+- 更新成功返回相同的 `PublicUser` 四字段，不改变 UUID、`password_hash` 或 `created_at`。
+- 原邮箱不再能登录，新邮箱可以登录；先前签发的 Token 仍通过不变的 UUID subject 解析同一用户。
+- 另一用户已占用该规范化邮箱时返回安全 HTTP 409：`{"detail":"An account with this email already exists"}`。
+- 应用层提前查询改善常规冲突路径；两个请求同时通过查询时，PostgreSQL 命名约束 `uq_users_email` 是最终防线。Service 回滚失败事务，Router 只映射已确认的邮箱冲突。
+
+### Stage 4分层与事务
+
+```text
+HTTP request
+-> Pydantic Schema
+-> Router / Bearer dependency
+-> Service
+-> Repository
+-> synchronous SQLAlchemy Session
+-> PostgreSQL
+-> explicit public response or safe error
+```
+
+- Router 负责 HTTP 解析、依赖、状态码和响应 Schema。
+- Schema 负责字段白名单、秘密感知输入和规范化。
+- Authentication Service 验证密码并签发 Token，不开启写事务。
+- Bearer dependency 验证 Token 后按 UUID 解析数据库用户。
+- Current-user Service 拥有邮箱写事务的 `commit`/`rollback`。
+- Repository 只查询、创建/修改实体和 `flush`，没有 HTTP 概念，也不 `commit` 或 `rollback`。
+- 请求依赖创建并关闭每个同步 Session。
 
 ## 测试和质量检查
 
@@ -337,19 +450,19 @@ uv lock --check
 git diff --check
 ```
 
-Stage 3 的完整质量门禁是普通 pytest、显式 PostgreSQL integration pytest、迁移往返、Ruff lint、Ruff format、mypy、lock check 和 diff check。SQLite 不作为 PostgreSQL integration 行为的替代品。
+Stage 4 的完整质量门禁是普通 pytest、显式 PostgreSQL integration pytest、OpenAPI 契约、Alembic head/drift、Ruff lint、Ruff format、mypy、lock check 和 diff check。SQLite 不作为 PostgreSQL integration 行为的替代品。
 
-## Stage 3 最终验证顺序
+## Stage 4 最终验证顺序
 
-下面的流程只操作可丢弃的 `postgres-test`。迁移往返前重建该服务以获得空 `tmpfs`；不要启动、重建或停止 `postgres-dev`，也不要删除开发 named volume。
+下面的流程只操作可丢弃的 `postgres-test`。重建该服务可获得空 `tmpfs`；不要启动、重建或停止 `postgres-dev`，也不要删除开发 named volume。Stage 4 没有新增数据库结构，因此这里只升级到现有 head 并检查 metadata drift，不执行新的迁移往返。
 
 1. 在没有数据库连接的情况下运行普通 pytest、warnings、Ruff、mypy、lock 和 diff 检查。
 2. 运行 `docker version` 和 `docker compose config --quiet`。
 3. 配置同一个专用测试端口和 `STMS_TEST_DATABASE_URL`，再只重建并启动 `postgres-test`。
 4. 使用 `validate_migration_test_target` 验证驱动、本地主机、数据库、用户和配置端口。
-5. 对空测试库执行 `upgrade head -> downgrade 2f6a8c1d4b90 -> upgrade head`。
+5. 对空测试库执行 `alembic upgrade head`。
 6. 运行 `alembic current`、`alembic heads` 和 `alembic check`，确认唯一 head 为 `9f3b2d6e8a41` 且没有 metadata drift。
-7. 运行全部 integration 测试，包含真实注册 201、422、顺序重复 409 和确定性双 Session 并发冲突。
+7. 运行全部 integration 测试，包含真实注册、登录、无效 Token、当前用户读写、顺序重复和确定性双 Session 并发冲突。
 8. 只运行 `docker compose stop postgres-test`；不要执行 `down --volumes`。
 
 ## 当前项目结构
@@ -361,7 +474,8 @@ FastAPI-STMS/
 |   |   |-- v1/
 |   |   |   |-- endpoints/
 |   |   |   |   |-- __init__.py
-|   |   |   |   `-- auth.py
+|   |   |   |   |-- auth.py
+|   |   |   |   `-- users.py
 |   |   |   |-- __init__.py
 |   |   |   `-- router.py
 |   |   |-- __init__.py
@@ -371,7 +485,8 @@ FastAPI-STMS/
 |   |   |-- config.py
 |   |   |-- email_normalization.py
 |   |   |-- exceptions.py
-|   |   `-- security.py
+|   |   |-- security.py
+|   |   `-- tokens.py
 |   |-- db/
 |   |   |-- __init__.py
 |   |   |-- base.py
@@ -382,9 +497,12 @@ FastAPI-STMS/
 |   |-- repositories/
 |   |   `-- users.py
 |   |-- schemas/
+|   |   |-- auth.py
 |   |   |-- health.py
 |   |   `-- user.py
 |   |-- services/
+|   |   |-- authentication.py
+|   |   |-- current_user.py
 |   |   `-- registration.py
 |   |-- __init__.py
 |   `-- main.py
@@ -405,16 +523,27 @@ FastAPI-STMS/
 |   |-- integration/
 |   |   |-- __init__.py
 |   |   |-- conftest.py
+|   |   |-- test_authentication.py
 |   |   |-- test_database_connection.py
 |   |   |-- test_migrations.py
 |   |   |-- test_registration.py
 |   |   |-- test_registration_conflict.py
-|   |   `-- test_readiness.py
+|   |   |-- test_readiness.py
+|   |   |-- test_user_email_uniqueness.py
+|   |   |-- test_user_migration.py
+|   |   `-- test_user_repository.py
+|   |-- test_access_tokens.py
 |   |-- test_alembic_config.py
+|   |-- test_auth_dependencies.py
+|   |-- test_auth_schemas.py
+|   |-- test_authentication_service.py
 |   |-- test_config.py
+|   |-- test_current_user_api.py
+|   |-- test_current_user_service.py
 |   |-- test_db_session.py
 |   |-- test_health.py
 |   |-- test_integration_database_safety.py
+|   |-- test_login_api.py
 |   |-- test_registration_api.py
 |   |-- test_registration_service.py
 |   |-- test_security.py
@@ -435,6 +564,6 @@ FastAPI-STMS/
 
 ## 当前范围与下一阶段
 
-Stage 3 已实现版本化用户注册、User ORM 和迁移、规范化邮箱唯一性、秘密感知 Schema、Argon2id、同步 Repository/Service、事务边界、安全 409，以及真实 PostgreSQL HTTP 与并发测试。
+Stage 4 已实现版本化注册和登录、短期 Access Token、严格 Bearer 校验、当前用户读取、邮箱更新、同步 Session/事务边界，以及真实 PostgreSQL HTTP 与并发测试。当前 API 是后续项目、任务和 Agent 能力复用的认证基础，不代表这些后续能力已经完成。
 
-下一阶段是 **Stage 4 — Login and current user**，但必须先完成 Stage 3 最终验收并获得项目所有者确认。当前不得提前实现登录、JWT、Access Token 或当前用户依赖。
+Stage 5 的 Refresh Token、轮换、退出登录和密码修改保留为非阻塞的延后认证增强轨道。StudyFlow Agent MVP 的下一条关键路径从 Stage 6 项目领域开始；进入前必须先验收 Stage 4 并审查 Stage 6 的详细任务契约，不得直接创建项目、任务或 Agent 代码。

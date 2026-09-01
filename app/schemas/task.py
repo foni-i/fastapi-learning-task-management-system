@@ -227,3 +227,11 @@ class TaskListResponse(BaseModel):
         if self.pages != expected or len(self.items) > self.page_size:
             raise ValueError("Task page metadata is inconsistent")
         return self
+
+
+class TaskErrorResponse(BaseModel):
+    """Document the fixed route-local safe Task error shape."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    detail: str

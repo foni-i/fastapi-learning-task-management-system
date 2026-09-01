@@ -1,8 +1,8 @@
 # FastAPI STMS
 
-FastAPI STMS 是 StudyFlow Agent 的分阶段后端学习项目。当前已完成 Stage 1 应用骨架、Stage 2 PostgreSQL/迁移基础设施、Stage 3 用户注册、Stage 4 短期 Access Token 登录和当前用户能力，以及 Stage 6 用户私有 Project 核心。认证和 Project 链路使用 FastAPI、Pydantic 2、SQLAlchemy 2 同步 Session、PostgreSQL、Alembic、Argon2id 和固定 HS256 JWT，并有真实 PostgreSQL 端到端测试。
+FastAPI STMS 是 StudyFlow Agent 的分阶段后端学习项目。当前已完成 Stage 1 应用骨架、Stage 2 PostgreSQL/迁移基础设施、Stage 3 用户注册、Stage 4 短期 Access Token 登录和当前用户能力、Stage 6 用户私有 Project 核心，以及 Stage 7 用户私有 Task 完整API。所有已实现链路使用 FastAPI、Pydantic 2、SQLAlchemy 2 同步 Session、PostgreSQL、Alembic、Argon2id 和固定 HS256 JWT，并有真实 PostgreSQL 端到端测试。
 
-当前尚未实现 Refresh Token、Token 持久化/轮换/撤销、退出登录、密码修改、管理员、密码找回、任务或 Agent 功能。LangGraph、LLM 调用、Agent Tools、RAG、Checkpoint、HITL、Streaming、MCP 和多 Agent 都只是后续路线，不应把当前仓库描述成已经完成的 Agent 系统。
+当前尚未实现 Refresh Token、Token 持久化/轮换/撤销、退出登录、密码修改、管理员、密码找回或 Agent 功能。LangGraph、LLM 调用、Agent Tools、RAG、Checkpoint、HITL、Streaming、MCP 和多 Agent 都只是后续路线，不应把当前仓库描述成已经完成的 Agent 系统。
 
 ## 前置条件
 
@@ -471,8 +471,113 @@ Stage 6 已实现经过 Bearer 认证的用户私有 Project 核心。正式路�
 且不得输出完整 URL 或密码、操作 `postgres-dev`、删除 volume，或把 SQLite 当作
 PostgreSQL 行为的替代。
 
-当前没有 Project DELETE/restore、Task 模型或 API，也没有 Agent Tool、LLM、
-LangGraph、RAG、Checkpoint、HITL 或 Streaming 功能。
+当前仍没有 Project DELETE/restore；Project 的移除语义保持幂等归档。Task
+能力已经在下述 Stage 7 中独立实现。当前没有 Agent Tool、LLM、LangGraph、
+RAG、Checkpoint、HITL 或 Streaming 功能。
+
+## Stage 7 Task API
+
+Stage 7 已实现经过 Bearer 认证、严格按当前用户隔离的 Task API。正式路由为：
+
+| 方法 | 路径 | 结果 |
+| --- | --- | --- |
+| `POST` | `/api/v1/tasks` | 在当前用户拥有的 Project 下创建 Task，返回 201 |
+| `GET` | `/api/v1/tasks` | 分页、筛选并稳定排序当前用户的 Task |
+| `GET` | `/api/v1/tasks/{task_id}` | 返回当前用户拥有的一个 Task |
+| `PATCH` | `/api/v1/tasks/{task_id}` | 严格部分更新字段或重开已完成 Task |
+| `POST` | `/api/v1/tasks/{task_id}/complete` | 幂等完成 Task |
+| `DELETE` | `/api/v1/tasks/{task_id}` | 永久删除Task，返回无响应体的204 |
+
+`PublicTask` 只返回 `id`、`project_id`、`title`、`description`、`status`、
+`priority`、`planned_date`、`due_at`、`estimated_minutes`、`completed_at`、
+`created_at` 和 `updated_at`。`user_id` 只来自认证上下文，不接受客户端输入，
+也不进入公开响应。
+
+创建请求只接受 `project_id`、`title`、`description`、`planned_date`、`due_at`、
+`estimated_minutes` 和 `priority`。标题去除首尾空白后为1～300字符；描述去除
+首尾空白后最多5000字符，纯空白规范化为 `null`；预计分钟数为1～1440。
+状态初始固定为 `TODO`，优先级默认为 `MEDIUM`。
+
+PATCH 可更新 `title`、`description`、`planned_date`、`due_at`、
+`estimated_minutes`、`priority` 和非完成状态。它严格区分“字段未提供”和
+“显式 `null`”：后者可清空描述、计划日期、截止时间和预计分钟数。客户端不能
+提交 `id`、`user_id`、`project_id`、`completed_at` 或时间戳，也不能通过 PATCH
+直接设置 `COMPLETED`。
+
+状态为 `TODO`、`IN_PROGRESS`、`COMPLETED` 和 `CANCELLED`；优先级为 `LOW`、
+`MEDIUM`、`HIGH` 和 `URGENT`。专用完成动作从任意非完成状态进入 `COMPLETED`，
+由服务端用同一个UTC时刻填写 `completed_at` 和 `updated_at`。重复完成不写入、
+不提交，也不改变时间戳。已完成Task可通过PATCH重开为 `TODO`、`IN_PROGRESS`
+或 `CANCELLED`，并原子清除 `completed_at`。普通非完成状态转换采用roadmap中的
+显式允许集合；不允许的转换返回安全422。
+
+同时存在 `planned_date` 和 `due_at` 时，截止时间不得早于计划日期的UTC起点。
+PATCH使用数据库现值和本次输入组成最终状态后再校验，因此不能通过分两次请求绕过
+日期不变量。相同规范化值的PATCH是幂等操作，不推进 `updated_at`，也不打开写事务。
+
+列表参数如下：
+
+- `page`：默认1，最小1；
+- `page_size`：默认20，范围1～100；
+- `project_id`、`status`、`priority`；
+- `planned_from`、`planned_to`；
+- `due_from`、`due_to`，必须是带时区时间；
+- `overdue`；
+- `title`，执行大小写不敏感的文字包含搜索，`%` 和 `_` 不作为通配符；
+- `sort_by`：仅允许 `created_at`、`updated_at`、`due_at`、`planned_date`、`title`；
+- `sort_direction`：仅允许 `asc` 或 `desc`。
+
+分页响应严格包含 `items`、`page`、`page_size`、`total` 和 `pages`。排序始终用
+`id` 作为同方向的确定性次级键；`due_at` 和 `planned_date` 排序时空值置后。
+“逾期”精确定义为 `due_at < 当前UTC时间` 且状态不是 `COMPLETED` 或
+`CANCELLED`。
+
+所有详情、列表、更新、完成和删除查询都包含认证用户UUID。访问其他用户Task与随机
+不存在的Task返回完全相同的HTTP 404：`{"detail":"Task does not exist"}`。
+创建Task前还会确认目标Project属于同一用户；PostgreSQL复合外键
+`fk_tasks_project_id_user_id_projects` 是绕过应用层写入时的最终所有权防线。
+
+Task删除是永久硬删除，成功只返回HTTP 204且没有响应体。Stage 7没有
+`deleted_at`、软删除、archive、restore或批量删除语义，也不会删除所属Project。
+
+Task请求继续遵循同步分层：Router只处理HTTP和认证依赖；Schema限制输入输出；
+Service拥有业务规则及写操作的 `commit`/`rollback`；Repository执行带所有权条件的
+查询、`add`、字段修改、`delete` 和 `flush`，从不自行提交或回滚；请求依赖负责关闭
+同步Session。数据库中的命名主键、外键、状态、优先级、分钟数、日期和完成时间检查
+约束是直接写入时的最终完整性防线。
+
+当前没有标签、学习记录、重复任务、提醒、协作、Agent Tool、Provider、LLM、
+LangGraph、RAG或Checkpoint。Stage 8只有在Stage 7最终验收和owner确认后才能开始。
+
+### Stage 7真实PostgreSQL验证
+
+真实验收只使用可丢弃的 `postgres-test`。默认宿主机端口为5433；Windows排除该
+端口时，可在当前PowerShell进程中把 `STMS_POSTGRES_TEST_PORT` 设为15433，并让
+`STMS_TEST_DATABASE_URL` 使用相同端口。不得输出完整URL或密码，也不得操作
+`postgres-dev` 或删除任何volume。
+
+```powershell
+uv run pytest tests/test_task_model.py tests/test_task_schemas.py tests/test_task_repository.py tests/test_task_service.py tests/test_task_api.py
+uv run pytest
+uv run pytest -W always -q
+
+# 先通过tests/integration/conftest.py中的专用测试库安全门并迁移到head。
+uv run pytest -m integration tests/integration/test_tasks.py
+uv run pytest -m integration tests/integration
+
+uv run alembic current
+uv run alembic heads
+uv run alembic check
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app tests alembic
+uv lock --check
+git diff --check
+```
+
+Stage 7迁移往返使用唯一Task head `6e2f9a4c1b73`：从空的专用测试库升级到head，
+降级到Project边界 `4d8c7a1b2e90`（Users与Projects保留、Tasks移除），再升级到
+head并运行 `alembic check`。这些命令不得指向开发数据库。
 
 ## 测试和质量检查
 
@@ -504,20 +609,21 @@ uv lock --check
 git diff --check
 ```
 
-Stage 4 的完整质量门禁是普通 pytest、显式 PostgreSQL integration pytest、OpenAPI 契约、Alembic head/drift、Ruff lint、Ruff format、mypy、lock check 和 diff check。SQLite 不作为 PostgreSQL integration 行为的替代品。
+Stage 7 的完整质量门禁是普通 pytest、显式 PostgreSQL integration pytest、OpenAPI 契约、Alembic迁移往返和head/drift、Ruff lint、Ruff format、mypy、lock check与diff check。SQLite不作为PostgreSQL integration行为的替代品。
 
-## Stage 4 最终验证顺序
+## Stage 7 最终验证顺序
 
-下面的流程只操作可丢弃的 `postgres-test`。重建该服务可获得空 `tmpfs`；不要启动、重建或停止 `postgres-dev`，也不要删除开发 named volume。Stage 4 没有新增数据库结构，因此这里只升级到现有 head 并检查 metadata drift，不执行新的迁移往返。
+下面的流程只操作可丢弃的 `postgres-test`。重建该服务可获得空 `tmpfs`；不要启动、重建或停止 `postgres-dev`，也不要删除开发named volume。
 
 1. 在没有数据库连接的情况下运行普通 pytest、warnings、Ruff、mypy、lock 和 diff 检查。
 2. 运行 `docker version` 和 `docker compose config --quiet`。
 3. 配置同一个专用测试端口和 `STMS_TEST_DATABASE_URL`，再只重建并启动 `postgres-test`。
 4. 使用 `validate_migration_test_target` 验证驱动、本地主机、数据库、用户和配置端口。
 5. 对空测试库执行 `alembic upgrade head`。
-6. 运行 `alembic current`、`alembic heads` 和 `alembic check`，确认唯一 head 为 `9f3b2d6e8a41` 且没有 metadata drift。
-7. 运行全部 integration 测试，包含真实注册、登录、无效 Token、当前用户读写、顺序重复和确定性双 Session 并发冲突。
-8. 只运行 `docker compose stop postgres-test`；不要执行 `down --volumes`。
+6. 确认Task表、索引、外键和检查约束，再降级到Project边界 `4d8c7a1b2e90`；Users和Projects必须保留，Tasks必须移除。
+7. 重新升级到唯一head `6e2f9a4c1b73`，运行 `alembic current`、`alembic heads` 和 `alembic check`。
+8. 运行全部integration测试，覆盖注册、认证、当前用户、Project、Task、所有权、约束和Session清理。
+9. 只运行 `docker compose stop postgres-test`；不要执行 `down --volumes`。
 
 ## 当前项目结构
 
@@ -529,7 +635,9 @@ FastAPI-STMS/
 |   |   |   |-- endpoints/
 |   |   |   |   |-- __init__.py
 |   |   |   |   |-- auth.py
-|   |   |   |   `-- users.py
+|   |   |   |   |-- users.py
+|   |   |   |   |-- projects.py
+|   |   |   |   `-- tasks.py
 |   |   |   |-- __init__.py
 |   |   |   `-- router.py
 |   |   |-- __init__.py
@@ -546,25 +654,19 @@ FastAPI-STMS/
 |   |   |-- base.py
 |   |   |-- probe.py
 |   |   `-- session.py
-|   |-- models/
-|   |   `-- user.py
-|   |-- repositories/
-|   |   `-- users.py
-|   |-- schemas/
-|   |   |-- auth.py
-|   |   |-- health.py
-|   |   `-- user.py
-|   |-- services/
-|   |   |-- authentication.py
-|   |   |-- current_user.py
-|   |   `-- registration.py
+|   |-- models/          # User、Project、Task ORM
+|   |-- repositories/    # 同步owner-scoped持久化
+|   |-- schemas/         # 严格请求、查询和公开响应
+|   |-- services/        # 业务规则与写事务边界
 |   |-- __init__.py
 |   `-- main.py
 |-- alembic/
 |   |-- versions/
 |   |   |-- 20260825_0001_stage_2_baseline.py
 |   |   |-- 20260826_0002_create_users_table.py
-|   |   `-- 20260826_0003_add_user_email_unique_constraint.py
+|   |   |-- 20260826_0003_add_user_email_unique_constraint.py
+|   |   |-- 20260831_0004_create_projects_table.py
+|   |   `-- 20260901_0005_create_tasks_table.py
 |   |-- env.py
 |   `-- script.py.mako
 |-- docs/
@@ -585,7 +687,11 @@ FastAPI-STMS/
 |   |   |-- test_readiness.py
 |   |   |-- test_user_email_uniqueness.py
 |   |   |-- test_user_migration.py
-|   |   `-- test_user_repository.py
+|   |   |-- test_user_repository.py
+|   |   |-- test_project_migration.py
+|   |   |-- test_projects.py
+|   |   |-- test_task_migration.py
+|   |   `-- test_tasks.py
 |   |-- test_access_tokens.py
 |   |-- test_alembic_config.py
 |   |-- test_auth_dependencies.py
@@ -614,10 +720,10 @@ FastAPI-STMS/
 `-- uv.lock
 ```
 
-该结构只列出当前版本中实际存在并与项目使用有关的文件和目录。
+该结构是当前模块化单体的核心摘录；完整测试和模块列表以仓库目录为准。
 
 ## 当前范围与下一阶段
 
-Stage 4 已实现版本化注册和登录、短期 Access Token、严格 Bearer 校验、当前用户读取、邮箱更新、同步 Session/事务边界，以及真实 PostgreSQL HTTP 与并发测试。当前 API 是后续项目、任务和 Agent 能力复用的认证基础，不代表这些后续能力已经完成。
+Stage 3、4、6和7已经形成注册、认证、当前用户、Project与Task的完整同步分层基础。Stage 7真实PostgreSQL验收证明全部Task HTTP操作、两用户隔离、状态机、稳定查询、命名约束、迁移往返和精确清理一致。
 
-Stage 5 的 Refresh Token、轮换、退出登录和密码修改保留为非阻塞的延后认证增强轨道。StudyFlow Agent MVP 的下一条关键路径从 Stage 6 项目领域开始；进入前必须先验收 Stage 4 并审查 Stage 6 的详细任务契约，不得直接创建项目、任务或 Agent 代码。
+Stage 5的Refresh Token、轮换、退出登录和密码修改保留为非阻塞的延后认证增强轨道。下一阶段是Stage 8 Agent foundation and minimal tool loop，但必须先获得owner对Stage 7的确认。当前尚未实现Provider、LLM调用、Agent Tool、Streaming、LangGraph、RAG、Checkpoint、HITL、MCP或多Agent。

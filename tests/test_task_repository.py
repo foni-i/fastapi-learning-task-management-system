@@ -230,3 +230,37 @@ def test_repository_rejects_non_allowlisted_sort_input(
             sort_direction=direction,
         )
     session.scalars.assert_not_called()
+
+
+def test_update_applies_only_service_values_and_flushes_without_transaction() -> None:
+    session = MagicMock(spec=Session)
+    repository = TaskRepository(session)
+    task = Task(
+        id=uuid4(),
+        user_id=uuid4(),
+        project_id=uuid4(),
+        title="Old",
+        description=None,
+        status="TODO",
+        priority="MEDIUM",
+        planned_date=None,
+        due_at=None,
+        estimated_minutes=None,
+        completed_at=None,
+        created_at=datetime(2026, 9, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 9, 1, tzinfo=UTC),
+    )
+    changed_at = datetime(2026, 9, 2, tzinfo=UTC)
+
+    result = repository.update(
+        task,
+        values={"title": "New", "description": "Detail", "priority": "HIGH"},
+        updated_at=changed_at,
+    )
+
+    assert result is task
+    assert (task.title, task.description, task.priority) == ("New", "Detail", "HIGH")
+    assert task.updated_at == changed_at
+    session.flush.assert_called_once_with()
+    session.commit.assert_not_called()
+    session.rollback.assert_not_called()

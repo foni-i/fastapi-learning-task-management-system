@@ -5,6 +5,7 @@ INVALID_CREDENTIALS_MESSAGE = "Invalid email or password"
 AUTHENTICATION_REQUIRED_MESSAGE = "Could not validate credentials"
 PROJECT_NOT_FOUND_MESSAGE = "Project does not exist"
 TASK_NOT_FOUND_MESSAGE = "Task does not exist"
+TASK_TRANSITION_MESSAGE = "Task status transition is not allowed"
 ARCHIVED_PROJECT_MESSAGE = "Archived project cannot be modified"
 
 
@@ -22,6 +23,14 @@ class ProjectNotFoundError(Exception):
 
 class TaskNotFoundError(Exception):
     """Hide whether a Task is absent or belongs to another user."""
+
+
+class TaskDateOrderError(ValueError):
+    """Signal an invalid effective Task planned/due date combination."""
+
+
+class TaskTransitionError(ValueError):
+    """Signal a disallowed Task lifecycle transition without internal details."""
 
 
 class ArchivedProjectError(Exception):

@@ -7,6 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.exceptions import TaskDateOrderError
 from app.models.task import TaskPriority, TaskStatus
 
 TASK_DATE_ORDER_MESSAGE = "Task due time cannot precede planned date"
@@ -52,7 +53,7 @@ def validate_task_date_order(
         return
     planned_start = datetime.combine(planned_date, time.min, tzinfo=UTC)
     if due_at < planned_start:
-        raise ValueError(TASK_DATE_ORDER_MESSAGE)
+        raise TaskDateOrderError(TASK_DATE_ORDER_MESSAGE)
 
 
 class TaskCreate(BaseModel):

@@ -108,6 +108,15 @@ def test_update_preserves_missing_and_explicit_null() -> None:
             TaskUpdate.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    "field",
+    ["id", "user_id", "project_id", "completed_at", "created_at", "updated_at"],
+)
+def test_update_rejects_internal_and_server_owned_fields(field: str) -> None:
+    with pytest.raises(ValidationError):
+        TaskUpdate.model_validate({field: "forbidden"})
+
+
 def test_query_defaults_bounds_ranges_and_sort_allowlist() -> None:
     query = TaskListQuery()
     assert (query.page, query.page_size) == (1, 20)

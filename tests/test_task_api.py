@@ -17,13 +17,23 @@ from app.core.exceptions import (
     AUTHENTICATION_REQUIRED_MESSAGE,
     PROJECT_NOT_FOUND_MESSAGE,
     TASK_NOT_FOUND_MESSAGE,
+    TASK_TRANSITION_MESSAGE,
     ProjectNotFoundError,
+    TaskDateOrderError,
     TaskNotFoundError,
+    TaskTransitionError,
 )
 from app.db.session import get_session
 from app.main import app
 from app.models import TaskPriority, TaskStatus, User
-from app.schemas.task import PublicTask, TaskCreate, TaskListQuery, TaskListResponse
+from app.schemas.task import (
+    TASK_DATE_ORDER_MESSAGE,
+    PublicTask,
+    TaskCreate,
+    TaskListQuery,
+    TaskListResponse,
+    TaskUpdate,
+)
 
 PUBLIC_FIELDS = {
     "id",
@@ -56,20 +66,24 @@ def make_user() -> User:
 
 
 def make_public_task(
-    *, task_id: UUID | None = None, project_id: UUID | None = None
+    *,
+    task_id: UUID | None = None,
+    project_id: UUID | None = None,
+    status: TaskStatus = TaskStatus.TODO,
 ) -> PublicTask:
     timestamp = datetime(2026, 9, 1, tzinfo=UTC)
+    completed_at = timestamp if status is TaskStatus.COMPLETED else None
     return PublicTask(
         id=task_id or uuid4(),
         project_id=project_id or uuid4(),
         title="Study",
         description=None,
-        status=TaskStatus.TODO,
+        status=status,
         priority=TaskPriority.MEDIUM,
         planned_date=None,
         due_at=None,
         estimated_minutes=30,
-        completed_at=None,
+        completed_at=completed_at,
         created_at=timestamp,
         updated_at=timestamp,
     )
@@ -311,6 +325,8 @@ def test_task_routes_require_existing_bearer_challenge(client: TestClient) -> No
             ),
             client.get("/api/v1/tasks"),
             client.get(f"/api/v1/tasks/{uuid4()}"),
+            client.patch(f"/api/v1/tasks/{uuid4()}", json={"title": "New"}),
+            client.post(f"/api/v1/tasks/{uuid4()}/complete"),
         )
     finally:
         app.dependency_overrides.pop(get_session, None)
@@ -319,3 +335,200 @@ def test_task_routes_require_existing_bearer_challenge(client: TestClient) -> No
         assert response.status_code == 401
         assert response.json() == {"detail": AUTHENTICATION_REQUIRED_MESSAGE}
         assert response.headers["www-authenticate"] == "Bearer"
+
+
+def test_update_task_delegates_missing_null_owner_and_same_session(
+    client: TestClient,
+    task_request_context: tuple[MagicMock, User, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, user, lifecycle = task_request_context
+    task_id = uuid4()
+    observed: dict[str, object] = {}
+
+    def fake_update(
+        received_task_id: UUID,
+        update: TaskUpdate,
+        user_id: UUID,
+        received_session: Session,
+    ) -> PublicTask:
+        observed.update(
+            task_id=received_task_id,
+            update=update,
+            user_id=user_id,
+            session=received_session,
+        )
+        return make_public_task(task_id=received_task_id)
+
+    monkeypatch.setattr(tasks, "update_owned_task", fake_update)
+    response = client.patch(
+        f"/api/v1/tasks/{task_id}",
+        json={"description": None, "due_at": None, "status": "IN_PROGRESS"},
+    )
+    assert response.status_code == 200
+    assert set(response.json()) == PUBLIC_FIELDS
+    update = observed["update"]
+    assert isinstance(update, TaskUpdate)
+    assert update.model_fields_set == {"description", "due_at", "status"}
+    assert observed["task_id"] == task_id
+    assert observed["user_id"] == user.id
+    assert observed["session"] is session
+    assert lifecycle == ["opened", "closed"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"id": str(uuid4())},
+        {"user_id": str(uuid4())},
+        {"project_id": str(uuid4())},
+        {"completed_at": "2026-09-01T00:00:00Z"},
+        {"created_at": "2026-09-01T00:00:00Z"},
+        {"title": None},
+        {"priority": None},
+        {"status": None},
+        {"status": "COMPLETED"},
+    ],
+)
+def test_update_task_rejects_invalid_or_internal_payload_before_service(
+    payload: dict[str, object],
+    client: TestClient,
+    task_request_context: tuple[MagicMock, User, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = MagicMock()
+    monkeypatch.setattr(tasks, "update_owned_task", service)
+    response = client.patch(f"/api/v1/tasks/{uuid4()}", json=payload)
+    assert response.status_code == 422
+    service.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("error", "detail"),
+    [
+        (TaskDateOrderError(TASK_DATE_ORDER_MESSAGE), TASK_DATE_ORDER_MESSAGE),
+        (TaskTransitionError(TASK_TRANSITION_MESSAGE), TASK_TRANSITION_MESSAGE),
+    ],
+)
+def test_update_task_maps_safe_domain_errors_to_422(
+    error: Exception,
+    detail: str,
+    client: TestClient,
+    task_request_context: tuple[MagicMock, User, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tasks, "update_owned_task", MagicMock(side_effect=error))
+    response = client.patch(f"/api/v1/tasks/{uuid4()}", json={"title": "New"})
+    assert response.status_code == 422
+    assert response.json() == {"detail": detail}
+
+
+@pytest.mark.parametrize("target", ["TODO", "IN_PROGRESS", "CANCELLED"])
+def test_update_task_returns_reopened_public_state(
+    target: str,
+    client: TestClient,
+    task_request_context: tuple[MagicMock, User, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_id = uuid4()
+
+    def fake_update(
+        received_task_id: UUID,
+        update: TaskUpdate,
+        _user_id: UUID,
+        _session: Session,
+    ) -> PublicTask:
+        assert received_task_id == task_id
+        assert update.status is TaskStatus(target)
+        return make_public_task(task_id=task_id, status=TaskStatus(target))
+
+    monkeypatch.setattr(tasks, "update_owned_task", fake_update)
+    response = client.patch(f"/api/v1/tasks/{task_id}", json={"status": target})
+    assert response.status_code == 200
+    assert response.json()["status"] == target
+    assert response.json()["completed_at"] is None
+
+
+@pytest.mark.parametrize("kind", ["missing", "foreign"])
+def test_update_task_hides_missing_and_foreign_with_same_404(
+    kind: str,
+    client: TestClient,
+    task_request_context: tuple[MagicMock, User, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tasks,
+        "update_owned_task",
+        MagicMock(side_effect=TaskNotFoundError(TASK_NOT_FOUND_MESSAGE)),
+    )
+    response = client.patch(f"/api/v1/tasks/{uuid4()}", json={"title": "New"})
+    assert kind in {"missing", "foreign"}
+    assert response.status_code == 404
+    assert response.json() == {"detail": TASK_NOT_FOUND_MESSAGE}
+
+
+def test_complete_task_delegates_owner_and_same_session(
+    client: TestClient,
+    task_request_context: tuple[MagicMock, User, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, user, lifecycle = task_request_context
+    task_id = uuid4()
+    observed: dict[str, object] = {}
+
+    def fake_complete(
+        received_task_id: UUID,
+        user_id: UUID,
+        received_session: Session,
+    ) -> PublicTask:
+        observed.update(
+            task_id=received_task_id,
+            user_id=user_id,
+            session=received_session,
+        )
+        return make_public_task(task_id=received_task_id, status=TaskStatus.COMPLETED)
+
+    monkeypatch.setattr(tasks, "complete_owned_task", fake_complete)
+    response = client.post(f"/api/v1/tasks/{task_id}/complete")
+    assert response.status_code == 200
+    assert set(response.json()) == PUBLIC_FIELDS
+    assert response.json()["status"] == "COMPLETED"
+    assert observed == {"task_id": task_id, "user_id": user.id, "session": session}
+    assert lifecycle == ["opened", "closed"]
+
+
+@pytest.mark.parametrize("operation", ["patch", "complete"])
+def test_lifecycle_routes_reject_malformed_uuid_before_service(
+    operation: str,
+    client: TestClient,
+    task_request_context: tuple[MagicMock, User, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = MagicMock()
+    if operation == "patch":
+        monkeypatch.setattr(tasks, "update_owned_task", service)
+        response = client.patch("/api/v1/tasks/not-a-uuid", json={"title": "New"})
+    else:
+        monkeypatch.setattr(tasks, "complete_owned_task", service)
+        response = client.post("/api/v1/tasks/not-a-uuid/complete")
+    assert response.status_code == 422
+    service.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["missing", "foreign"])
+def test_complete_task_hides_missing_and_foreign_with_same_404(
+    kind: str,
+    client: TestClient,
+    task_request_context: tuple[MagicMock, User, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tasks,
+        "complete_owned_task",
+        MagicMock(side_effect=TaskNotFoundError(TASK_NOT_FOUND_MESSAGE)),
+    )
+    response = client.post(f"/api/v1/tasks/{uuid4()}/complete")
+    assert kind in {"missing", "foreign"}
+    assert response.status_code == 404
+    assert response.json() == {"detail": TASK_NOT_FOUND_MESSAGE}

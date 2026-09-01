@@ -10,21 +10,32 @@ from app.api.dependencies import get_current_user
 from app.core.exceptions import (
     PROJECT_NOT_FOUND_MESSAGE,
     TASK_NOT_FOUND_MESSAGE,
+    TASK_TRANSITION_MESSAGE,
     ProjectNotFoundError,
+    TaskDateOrderError,
     TaskNotFoundError,
+    TaskTransitionError,
 )
 from app.db.session import get_session
 from app.models.user import User
 from app.schemas.auth import AuthenticationErrorResponse
 from app.schemas.project import ProjectErrorResponse
 from app.schemas.task import (
+    TASK_DATE_ORDER_MESSAGE,
     PublicTask,
     TaskCreate,
     TaskErrorResponse,
     TaskListQuery,
     TaskListResponse,
+    TaskUpdate,
 )
-from app.services.tasks import create_task, get_owned_task, list_owned_tasks
+from app.services.tasks import (
+    complete_owned_task,
+    create_task,
+    get_owned_task,
+    list_owned_tasks,
+    update_owned_task,
+)
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -106,5 +117,63 @@ def get_task_endpoint(
 
     try:
         return get_owned_task(task_id, current_user.id, session)
+    except TaskNotFoundError:
+        _raise_task_not_found()
+
+
+@router.patch(
+    "/{task_id}",
+    response_model=PublicTask,
+    responses={
+        status.HTTP_401_UNAUTHORIZED: AUTHENTICATION_RESPONSE,
+        status.HTTP_404_NOT_FOUND: TASK_NOT_FOUND_RESPONSE,
+    },
+)
+def update_task_endpoint(
+    task_id: UUID,
+    task_update: TaskUpdate,
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> PublicTask:
+    """Apply one strict owner-scoped Task update."""
+
+    try:
+        return update_owned_task(
+            task_id,
+            task_update,
+            current_user.id,
+            session,
+        )
+    except TaskNotFoundError:
+        _raise_task_not_found()
+    except TaskDateOrderError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=TASK_DATE_ORDER_MESSAGE,
+        ) from None
+    except TaskTransitionError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=TASK_TRANSITION_MESSAGE,
+        ) from None
+
+
+@router.post(
+    "/{task_id}/complete",
+    response_model=PublicTask,
+    responses={
+        status.HTTP_401_UNAUTHORIZED: AUTHENTICATION_RESPONSE,
+        status.HTTP_404_NOT_FOUND: TASK_NOT_FOUND_RESPONSE,
+    },
+)
+def complete_task_endpoint(
+    task_id: UUID,
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> PublicTask:
+    """Complete one owned Task through the server-owned lifecycle action."""
+
+    try:
+        return complete_owned_task(task_id, current_user.id, session)
     except TaskNotFoundError:
         _raise_task_not_found()

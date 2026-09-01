@@ -1,5 +1,6 @@
 """Owned Task persistence and deterministic query operations."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from uuid import UUID
@@ -160,3 +161,18 @@ class TaskRepository:
             select(func.count()).select_from(Task).where(*_owned_filters(criteria))
         )
         return int(self._session.scalar(statement) or 0)
+
+    def update(
+        self,
+        task: Task,
+        *,
+        values: Mapping[str, object],
+        updated_at: datetime,
+    ) -> Task:
+        """Apply Service-approved changes and flush without transaction control."""
+
+        for field_name, value in values.items():
+            setattr(task, field_name, value)
+        task.updated_at = updated_at
+        self._session.flush()
+        return task

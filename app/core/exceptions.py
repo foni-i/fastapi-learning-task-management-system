@@ -21,3 +21,7 @@ class ProjectNotFoundError(Exception):
 
 class ArchivedProjectError(Exception):
     """Signal that ordinary mutation cannot change an archived Project."""
+
+
+class ProjectDateOrderError(ValueError):
+    """Signal a safe Project date-order violation across persisted state."""

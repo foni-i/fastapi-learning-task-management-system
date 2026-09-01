@@ -20,10 +20,16 @@ def test_default_application_is_importable_with_basic_metadata() -> None:
         "/api/v1/auth/login",
         "/api/v1/auth/register",
         "/api/v1/users/me",
+        "/api/v1/projects",
+        "/api/v1/projects/{project_id}",
+        "/api/v1/projects/{project_id}/archive",
     }
     assert set(paths["/api/v1/auth/login"]) == {"post"}
     assert set(paths["/api/v1/auth/register"]) == {"post"}
     assert set(paths["/api/v1/users/me"]) == {"get", "patch"}
+    assert set(paths["/api/v1/projects"]) == {"get", "post"}
+    assert set(paths["/api/v1/projects/{project_id}"]) == {"get", "patch"}
+    assert set(paths["/api/v1/projects/{project_id}/archive"]) == {"post"}
 
 
 def test_create_app_applies_explicit_settings() -> None:

@@ -6,6 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.exceptions import ProjectDateOrderError
 from app.models.project import ProjectStatus
 
 PROJECT_NAME_ERROR_MESSAGE = "Project name must contain between 1 and 200 characters"
@@ -23,7 +24,7 @@ def validate_project_date_order(
     """Reject a target date before a simultaneously effective start date."""
 
     if start_date is not None and target_date is not None and target_date < start_date:
-        raise ValueError(PROJECT_DATE_ORDER_ERROR_MESSAGE)
+        raise ProjectDateOrderError(PROJECT_DATE_ORDER_ERROR_MESSAGE)
 
 
 def _trim_name(value: object) -> object:
@@ -182,3 +183,11 @@ class ProjectListResponse(BaseModel):
         if len(self.items) > self.page_size:
             raise ValueError("Project page contains too many items")
         return self
+
+
+class ProjectErrorResponse(BaseModel):
+    """Document the current route-local safe Project error shape."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    detail: str

@@ -8,14 +8,14 @@ from sqlalchemy import create_engine, pool
 from alembic import context
 from app.core.config import get_settings
 from app.db.session import DatabaseConfigurationError
-from app.models import Project
+from app.models import Task
 
 config: Config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
-target_metadata = Project.metadata
+target_metadata = Task.metadata
 
 
 def get_database_url() -> str:

@@ -16,7 +16,7 @@ def test_user_remains_registered_in_shared_product_metadata() -> None:
     """Keep the exact User mapping after Project metadata is introduced."""
 
     assert User.metadata is Base.metadata
-    assert set(Base.metadata.tables) == {"users", "projects"}
+    assert set(Base.metadata.tables) == {"users", "projects", "tasks"}
     assert set(User.__table__.columns.keys()) == EXPECTED_COLUMNS
 
 

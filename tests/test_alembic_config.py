@@ -19,7 +19,7 @@ from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import DatabaseConfigurationError
 from app.main import create_app
-from app.models import Project, User
+from app.models import Project, Task, User
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ALEMBIC_CONFIG_PATH = PROJECT_ROOT / "alembic.ini"
@@ -30,6 +30,7 @@ BASELINE_REVISION = "2f6a8c1d4b90"
 USER_REVISION = "7c9e1b4a6d32"
 EMAIL_UNIQUE_REVISION = "9f3b2d6e8a41"
 PROJECT_REVISION = "4d8c7a1b2e90"
+TASK_REVISION = "6e2f9a4c1b73"
 DATABASE_PASSWORD = "test-only-password"
 VALID_DATABASE_URL = (
     f"postgresql+psycopg://test_user:{DATABASE_PASSWORD}@127.0.0.1:5432/test_database"
@@ -91,17 +92,19 @@ def test_alembic_configuration_loads_linear_product_migration_chain() -> None:
     assert Path(script_directory.dir).resolve() == ALEMBIC_DIRECTORY.resolve()
     assert ALEMBIC_VERSIONS_DIRECTORY.is_dir()
     revisions = list(script_directory.walk_revisions())
-    assert len(list(ALEMBIC_VERSIONS_DIRECTORY.glob("*.py"))) == 4
-    assert script_directory.get_heads() == [PROJECT_REVISION]
-    assert len(revisions) == 4
-    assert revisions[0].revision == PROJECT_REVISION
-    assert revisions[0].down_revision == EMAIL_UNIQUE_REVISION
-    assert revisions[1].revision == EMAIL_UNIQUE_REVISION
-    assert revisions[1].down_revision == USER_REVISION
-    assert revisions[2].revision == USER_REVISION
-    assert revisions[2].down_revision == BASELINE_REVISION
-    assert revisions[3].revision == BASELINE_REVISION
-    assert revisions[3].down_revision is None
+    assert len(list(ALEMBIC_VERSIONS_DIRECTORY.glob("*.py"))) == 5
+    assert script_directory.get_heads() == [TASK_REVISION]
+    assert len(revisions) == 5
+    assert revisions[0].revision == TASK_REVISION
+    assert revisions[0].down_revision == PROJECT_REVISION
+    assert revisions[1].revision == PROJECT_REVISION
+    assert revisions[1].down_revision == EMAIL_UNIQUE_REVISION
+    assert revisions[2].revision == EMAIL_UNIQUE_REVISION
+    assert revisions[2].down_revision == USER_REVISION
+    assert revisions[3].revision == USER_REVISION
+    assert revisions[3].down_revision == BASELINE_REVISION
+    assert revisions[4].revision == BASELINE_REVISION
+    assert revisions[4].down_revision is None
 
 
 def test_alembic_config_contains_no_database_url_or_password() -> None:
@@ -137,8 +140,9 @@ def test_offline_environment_uses_settings_and_base_metadata(
     assert captured_configuration["compare_server_default"] is True
     assert "render_as_batch" not in captured_configuration
     assert captured_configuration["target_metadata"] is Project.metadata
+    assert captured_configuration["target_metadata"] is Task.metadata
     assert captured_configuration["target_metadata"] is User.metadata
-    assert set(Base.metadata.tables) == {"users", "projects"}
+    assert set(Base.metadata.tables) == {"users", "projects", "tasks"}
 
 
 def test_online_environment_uses_sync_engine_without_network(

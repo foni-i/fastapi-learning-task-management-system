@@ -12,6 +12,7 @@ from sqlalchemy import (
     Index,
     PrimaryKeyConstraint,
     String,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects import postgresql
@@ -35,6 +36,7 @@ class Project(Base):
     __tablename__ = "projects"
     __table_args__ = (
         PrimaryKeyConstraint("id", name="pk_projects"),
+        UniqueConstraint("id", "user_id", name="uq_projects_id_user_id"),
         ForeignKeyConstraint(
             ["user_id"],
             ["users.id"],

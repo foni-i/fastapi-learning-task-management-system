@@ -33,7 +33,7 @@ def test_project_registers_in_shared_metadata_with_exact_columns() -> None:
     """Discover users and projects without registering future tables."""
 
     assert Project.metadata is Base.metadata
-    assert set(Base.metadata.tables) == {"users", "projects"}
+    assert set(Base.metadata.tables) == {"users", "projects", "tasks"}
     assert set(Project.__table__.columns.keys()) == EXPECTED_COLUMNS
 
 
@@ -88,6 +88,7 @@ def test_project_has_exact_named_constraints_and_owner_index() -> None:
         "ck_projects_name_not_blank",
         "ck_projects_status",
         "ck_projects_target_date_not_before_start_date",
+        "uq_projects_id_user_id",
     }
     foreign_key = constraints["fk_projects_user_id_users"]
     assert isinstance(foreign_key, ForeignKeyConstraint)

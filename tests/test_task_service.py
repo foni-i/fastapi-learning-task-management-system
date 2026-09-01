@@ -30,6 +30,7 @@ from app.schemas.task import (
 from app.services.tasks import (
     complete_owned_task,
     create_task,
+    delete_owned_task,
     get_owned_task,
     list_owned_tasks,
     update_owned_task,
@@ -589,3 +590,66 @@ def test_lifecycle_write_failure_rolls_back_and_propagates(operation: str) -> No
     assert exc_info.value is failure
     session.rollback.assert_called_once_with()
     session.commit.assert_not_called()
+
+
+def test_delete_owned_task_commits_once_without_public_result() -> None:
+    session = MagicMock(spec=Session)
+    repository = MagicMock(spec=TaskRepository)
+    repository.delete_owned.return_value = True
+    task_id, user_id = uuid4(), uuid4()
+
+    delete_owned_task(
+        task_id,
+        user_id,
+        session,
+        repository_factory=lambda received: cast(TaskRepository, repository),
+    )
+
+    repository.delete_owned.assert_called_once_with(task_id=task_id, user_id=user_id)
+    session.commit.assert_called_once_with()
+    session.rollback.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["missing", "foreign"])
+def test_delete_owned_task_hides_missing_and_foreign_without_transaction(
+    kind: str,
+) -> None:
+    session = MagicMock(spec=Session)
+    repository = MagicMock(spec=TaskRepository)
+    repository.delete_owned.return_value = False
+
+    with pytest.raises(TaskNotFoundError) as exc_info:
+        delete_owned_task(
+            uuid4(),
+            uuid4(),
+            session,
+            repository_factory=lambda received: cast(TaskRepository, repository),
+        )
+
+    assert kind in {"missing", "foreign"}
+    assert str(exc_info.value) == TASK_NOT_FOUND_MESSAGE
+    session.commit.assert_not_called()
+    session.rollback.assert_not_called()
+
+
+@pytest.mark.parametrize("failure_point", ["repository", "commit"])
+def test_delete_owned_task_rolls_back_write_failures(failure_point: str) -> None:
+    session = MagicMock(spec=Session)
+    repository = MagicMock(spec=TaskRepository)
+    failure = RuntimeError("controlled delete failure")
+    if failure_point == "repository":
+        repository.delete_owned.side_effect = failure
+    else:
+        repository.delete_owned.return_value = True
+        session.commit.side_effect = failure
+
+    with pytest.raises(RuntimeError) as exc_info:
+        delete_owned_task(
+            uuid4(),
+            uuid4(),
+            session,
+            repository_factory=lambda received: cast(TaskRepository, repository),
+        )
+
+    assert exc_info.value is failure
+    session.rollback.assert_called_once_with()

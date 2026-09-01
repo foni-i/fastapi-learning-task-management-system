@@ -3,7 +3,7 @@
 from typing import Annotated, NoReturn
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
@@ -32,6 +32,7 @@ from app.schemas.task import (
 from app.services.tasks import (
     complete_owned_task,
     create_task,
+    delete_owned_task,
     get_owned_task,
     list_owned_tasks,
     update_owned_task,
@@ -177,3 +178,26 @@ def complete_task_endpoint(
         return complete_owned_task(task_id, current_user.id, session)
     except TaskNotFoundError:
         _raise_task_not_found()
+
+
+@router.delete(
+    "/{task_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    responses={
+        status.HTTP_401_UNAUTHORIZED: AUTHENTICATION_RESPONSE,
+        status.HTTP_404_NOT_FOUND: TASK_NOT_FOUND_RESPONSE,
+    },
+)
+def delete_task_endpoint(
+    task_id: UUID,
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Response:
+    """Permanently delete one Task without revealing foreign ownership."""
+
+    try:
+        delete_owned_task(task_id, current_user.id, session)
+    except TaskNotFoundError:
+        _raise_task_not_found()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

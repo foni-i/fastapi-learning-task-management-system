@@ -122,6 +122,17 @@ class TaskRepository:
         statement = select(Task).where(Task.id == task_id, Task.user_id == user_id)
         return self._session.scalar(statement)
 
+    def delete_owned(self, *, task_id: UUID, user_id: UUID) -> bool:
+        """Delete one owner-scoped Task and flush without transaction control."""
+
+        statement = select(Task).where(Task.id == task_id, Task.user_id == user_id)
+        task = self._session.scalar(statement)
+        if task is None:
+            return False
+        self._session.delete(task)
+        self._session.flush()
+        return True
+
     def list_owned(
         self,
         *,

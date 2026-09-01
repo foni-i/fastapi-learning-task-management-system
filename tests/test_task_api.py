@@ -326,6 +326,7 @@ def test_task_routes_require_existing_bearer_challenge(client: TestClient) -> No
             client.get("/api/v1/tasks"),
             client.get(f"/api/v1/tasks/{uuid4()}"),
             client.patch(f"/api/v1/tasks/{uuid4()}", json={"title": "New"}),
+            client.delete(f"/api/v1/tasks/{uuid4()}"),
             client.post(f"/api/v1/tasks/{uuid4()}/complete"),
         )
     finally:
@@ -498,7 +499,7 @@ def test_complete_task_delegates_owner_and_same_session(
     assert lifecycle == ["opened", "closed"]
 
 
-@pytest.mark.parametrize("operation", ["patch", "complete"])
+@pytest.mark.parametrize("operation", ["patch", "complete", "delete"])
 def test_lifecycle_routes_reject_malformed_uuid_before_service(
     operation: str,
     client: TestClient,
@@ -509,9 +510,12 @@ def test_lifecycle_routes_reject_malformed_uuid_before_service(
     if operation == "patch":
         monkeypatch.setattr(tasks, "update_owned_task", service)
         response = client.patch("/api/v1/tasks/not-a-uuid", json={"title": "New"})
-    else:
+    elif operation == "complete":
         monkeypatch.setattr(tasks, "complete_owned_task", service)
         response = client.post("/api/v1/tasks/not-a-uuid/complete")
+    else:
+        monkeypatch.setattr(tasks, "delete_owned_task", service)
+        response = client.delete("/api/v1/tasks/not-a-uuid")
     assert response.status_code == 422
     service.assert_not_called()
 
@@ -532,3 +536,52 @@ def test_complete_task_hides_missing_and_foreign_with_same_404(
     assert kind in {"missing", "foreign"}
     assert response.status_code == 404
     assert response.json() == {"detail": TASK_NOT_FOUND_MESSAGE}
+
+
+def test_delete_task_delegates_owner_and_same_session_with_empty_204(
+    client: TestClient,
+    task_request_context: tuple[MagicMock, User, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, user, lifecycle = task_request_context
+    task_id = uuid4()
+    service = MagicMock(return_value=None)
+    monkeypatch.setattr(tasks, "delete_owned_task", service)
+
+    response = client.delete(f"/api/v1/tasks/{task_id}")
+
+    assert response.status_code == 204
+    assert response.content == b""
+    assert response.headers.get("content-type") is None
+    service.assert_called_once_with(task_id, user.id, session)
+    assert lifecycle == ["opened", "closed"]
+
+
+@pytest.mark.parametrize("kind", ["missing", "foreign"])
+def test_delete_task_hides_missing_and_foreign_with_same_404(
+    kind: str,
+    client: TestClient,
+    task_request_context: tuple[MagicMock, User, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tasks,
+        "delete_owned_task",
+        MagicMock(side_effect=TaskNotFoundError(TASK_NOT_FOUND_MESSAGE)),
+    )
+
+    response = client.delete(f"/api/v1/tasks/{uuid4()}")
+
+    assert kind in {"missing", "foreign"}
+    assert response.status_code == 404
+    assert response.json() == {"detail": TASK_NOT_FOUND_MESSAGE}
+
+
+def test_task_delete_has_no_archive_restore_or_bulk_surface(
+    client: TestClient,
+    task_request_context: tuple[MagicMock, User, list[str]],
+) -> None:
+    task_id = uuid4()
+    assert client.post(f"/api/v1/tasks/{task_id}/archive").status_code == 404
+    assert client.post(f"/api/v1/tasks/{task_id}/restore").status_code == 404
+    assert client.delete("/api/v1/tasks").status_code == 405

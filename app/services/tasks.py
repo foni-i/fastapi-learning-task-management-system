@@ -238,3 +238,25 @@ def complete_owned_task(
     except Exception:
         session.rollback()
         raise
+
+
+def delete_owned_task(
+    task_id: UUID,
+    user_id: UUID,
+    session: Session,
+    *,
+    repository_factory: TaskRepositoryFactory = TaskRepository,
+) -> None:
+    """Permanently delete one owned Task within a Service-owned transaction."""
+
+    repository = repository_factory(session)
+    try:
+        deleted = repository.delete_owned(task_id=task_id, user_id=user_id)
+        if not deleted:
+            raise TaskNotFoundError(TASK_NOT_FOUND_MESSAGE)
+        session.commit()
+    except TaskNotFoundError:
+        raise
+    except Exception:
+        session.rollback()
+        raise

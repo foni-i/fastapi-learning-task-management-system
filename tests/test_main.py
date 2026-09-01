@@ -34,7 +34,7 @@ def test_default_application_is_importable_with_basic_metadata() -> None:
     assert set(paths["/api/v1/projects/{project_id}"]) == {"get", "patch"}
     assert set(paths["/api/v1/projects/{project_id}/archive"]) == {"post"}
     assert set(paths["/api/v1/tasks"]) == {"get", "post"}
-    assert set(paths["/api/v1/tasks/{task_id}"]) == {"get", "patch"}
+    assert set(paths["/api/v1/tasks/{task_id}"]) == {"delete", "get", "patch"}
     assert set(paths["/api/v1/tasks/{task_id}/complete"]) == {"post"}
 
 

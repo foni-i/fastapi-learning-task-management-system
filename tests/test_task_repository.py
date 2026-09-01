@@ -264,3 +264,51 @@ def test_update_applies_only_service_values_and_flushes_without_transaction() ->
     session.flush.assert_called_once_with()
     session.commit.assert_not_called()
     session.rollback.assert_not_called()
+
+
+def test_delete_owned_uses_task_and_owner_predicates_then_flushes() -> None:
+    session = MagicMock(spec=Session)
+    task = Task(id=uuid4(), user_id=uuid4(), project_id=uuid4(), title="Task")
+    session.scalar.return_value = task
+    repository = TaskRepository(session)
+
+    assert repository.delete_owned(task_id=task.id, user_id=task.user_id) is True
+
+    statement = session.scalar.call_args.args[0]
+    sql = sql_text(statement)
+    assert "tasks.id =" in sql
+    assert "tasks.user_id =" in sql
+    session.delete.assert_called_once_with(task)
+    session.flush.assert_called_once_with()
+    session.commit.assert_not_called()
+    session.rollback.assert_not_called()
+
+
+def test_delete_owned_missing_is_transaction_neutral() -> None:
+    session = MagicMock(spec=Session)
+    session.scalar.return_value = None
+    repository = TaskRepository(session)
+
+    assert repository.delete_owned(task_id=uuid4(), user_id=uuid4()) is False
+
+    session.delete.assert_not_called()
+    session.flush.assert_not_called()
+    session.commit.assert_not_called()
+    session.rollback.assert_not_called()
+
+
+def test_delete_owned_propagates_flush_failure_without_owning_rollback() -> None:
+    session = MagicMock(spec=Session)
+    task = Task(id=uuid4(), user_id=uuid4(), project_id=uuid4(), title="Task")
+    session.scalar.return_value = task
+    failure = RuntimeError("controlled delete flush failure")
+    session.flush.side_effect = failure
+    repository = TaskRepository(session)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        repository.delete_owned(task_id=task.id, user_id=task.user_id)
+
+    assert exc_info.value is failure
+    session.delete.assert_called_once_with(task)
+    session.commit.assert_not_called()
+    session.rollback.assert_not_called()

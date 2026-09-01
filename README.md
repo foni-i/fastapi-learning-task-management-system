@@ -1,8 +1,8 @@
 # FastAPI STMS
 
-FastAPI STMS 是 StudyFlow Agent 的分阶段后端学习项目。当前已完成 Stage 1 应用骨架、Stage 2 PostgreSQL/迁移基础设施、Stage 3 用户注册，以及 Stage 4 短期 Access Token 登录和当前用户能力。认证链路使用 FastAPI、Pydantic 2、SQLAlchemy 2 同步 Session、PostgreSQL、Alembic、Argon2id 和固定 HS256 JWT，并有真实 PostgreSQL 端到端测试。
+FastAPI STMS 是 StudyFlow Agent 的分阶段后端学习项目。当前已完成 Stage 1 应用骨架、Stage 2 PostgreSQL/迁移基础设施、Stage 3 用户注册、Stage 4 短期 Access Token 登录和当前用户能力，以及 Stage 6 用户私有 Project 核心。认证和 Project 链路使用 FastAPI、Pydantic 2、SQLAlchemy 2 同步 Session、PostgreSQL、Alembic、Argon2id 和固定 HS256 JWT，并有真实 PostgreSQL 端到端测试。
 
-当前尚未实现 Refresh Token、Token 持久化/轮换/撤销、退出登录、密码修改、管理员、密码找回、项目、任务或 Agent 功能。LangGraph、LLM 调用、Agent Tools、RAG、Checkpoint、HITL、Streaming、MCP 和多 Agent 都只是后续路线，不应把当前仓库描述成已经完成的 Agent 系统。
+当前尚未实现 Refresh Token、Token 持久化/轮换/撤销、退出登录、密码修改、管理员、密码找回、任务或 Agent 功能。LangGraph、LLM 调用、Agent Tools、RAG、Checkpoint、HITL、Streaming、MCP 和多 Agent 都只是后续路线，不应把当前仓库描述成已经完成的 Agent 系统。
 
 ## 前置条件
 
@@ -419,6 +419,60 @@ HTTP request
 - Current-user Service 拥有邮箱写事务的 `commit`/`rollback`。
 - Repository 只查询、创建/修改实体和 `flush`，没有 HTTP 概念，也不 `commit` 或 `rollback`。
 - 请求依赖创建并关闭每个同步 Session。
+
+## Stage 6 Project API
+
+Stage 6 已实现经过 Bearer 认证的用户私有 Project 核心。正式路由为：
+
+| 方法 | 路径 | 结果 |
+| --- | --- | --- |
+| `POST` | `/api/v1/projects` | 创建当前用户的 Project，返回 201 |
+| `GET` | `/api/v1/projects` | 返回当前用户的固定分页列表 |
+| `GET` | `/api/v1/projects/{project_id}` | 返回一个当前用户拥有的 Project |
+| `PATCH` | `/api/v1/projects/{project_id}` | 严格部分更新非归档 Project |
+| `POST` | `/api/v1/projects/{project_id}/archive` | 幂等归档 Project |
+
+请求必须携带 `Authorization: Bearer <access-token>`，其中 Token 仅使用本地
+登录接口签发的值；不要把真实 Token 写入源码、文档或日志。`user_id` 只来自认证
+上下文，客户端不能提交或覆盖它，公开响应也不会返回它。`PublicProject` 的字段
+白名单严格为 `id`、`name`、`description`、`start_date`、`target_date`、
+`status`、`created_at` 和 `updated_at`。
+
+创建请求只接受 `name`、`description`、`start_date` 和 `target_date`。`name`
+去除首尾空白后必须为 1～200 字符；`description` 去除首尾空白后最多 2000
+字符，空白文本规范化为 `null`。日期可为空；同时存在时 `target_date` 不得早于
+`start_date`。初始状态固定为 `NOT_STARTED`，其余公开状态为
+`IN_PROGRESS`、`COMPLETED` 和 `ARCHIVED`。
+
+更新请求可包含 `name`、`description`、`start_date`、`target_date` 和非归档
+状态。它区分字段未提供与显式 `null`；后者可清空三个可选字段。普通 PATCH
+不能直接设置 `ARCHIVED`，归档必须使用专用动作。实际变化推进 `updated_at`，
+无有效变化的请求保持幂等且不写数据库。归档动作第一次持久化状态，重复调用返回
+相同公开结果且不再次更新时间。归档后普通 PATCH 返回 HTTP 409：
+`{"detail":"Archived project cannot be modified"}`。
+
+列表参数固定为 `page`（默认 1）、`page_size`（默认 20，最大 100）和
+`include_archived`（默认 `false`）。顺序固定为 `created_at DESC, id DESC`；
+响应包含 `items`、`page`、`page_size`、`total` 和 `pages`。默认不返回归档
+记录，显式 `include_archived=true` 才包含它们；当前没有公开 sort、search 或
+`user_id` 参数。
+
+所有详情、更新和归档查询同时限定 Project ID 与当前用户 UUID。资源不存在和访问
+其他用户资源均返回相同的 HTTP 404：`{"detail":"Project does not exist"}`，
+避免泄露所有者和记录是否存在。Router 只处理 HTTP；Service 拥有写操作的
+`commit`/`rollback`；Repository 只执行带所有权条件的查询、`add`、字段变更和
+`flush`；请求依赖创建并关闭同步 SQLAlchemy Session。PostgreSQL 中命名的主键、
+外键、非空白名称、状态、日期顺序检查约束和所有者索引是绕过 HTTP 写入时的最终
+完整性防线。
+
+真实验收只使用 `postgres-test`。默认宿主机端口为 5433；Windows 排除该端口时，
+可在当前 PowerShell 进程中把 `STMS_POSTGRES_TEST_PORT` 设置为 15433，并让
+`STMS_TEST_DATABASE_URL` 使用同一端口。执行迁移前必须通过现有测试数据库安全门，
+且不得输出完整 URL 或密码、操作 `postgres-dev`、删除 volume，或把 SQLite 当作
+PostgreSQL 行为的替代。
+
+当前没有 Project DELETE/restore、Task 模型或 API，也没有 Agent Tool、LLM、
+LangGraph、RAG、Checkpoint、HITL 或 Streaming 功能。
 
 ## 测试和质量检查
 

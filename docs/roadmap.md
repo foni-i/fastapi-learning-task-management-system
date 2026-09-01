@@ -2434,18 +2434,454 @@ behavior.
 Tasks belong to both a user and one of that user's projects. Service logic owns
 state transitions and dates; Repository predicates enforce ownership isolation.
 
-- **Task 7.1:** Task decisions, ORM model, ownership constraints, and migration.
-- **Task 7.2:** Strict create/update/public/list schemas and bounded inputs.
-- **Task 7.3:** Owned Repository plus create Service and transaction tests.
-- **Task 7.4:** Create and retrieve task HTTP endpoints.
-- **Task 7.5:** Stable pagination with status/project filters and sort allowlist.
-- **Task 7.6:** Update fields and adjust deadline with date invariants.
-- **Task 7.7:** Idempotent completion/reopen behavior and server timestamps.
-- **Task 7.8:** Archive or safe-delete behavior with ownership protection.
-- **Task 7.9:** PostgreSQL isolation/invariant integration and documentation.
+This stage keeps the synchronous `Router -> Service -> Repository -> SQLAlchemy`
+architecture. A future Agent tool will call the same Service; it will not receive
+a Session or model-controlled `user_id`. Stage 7 contains three result milestones:
+Tasks 7.1–7.3 establish the domain core, Tasks 7.4–7.6 expose the main Bearer API,
+and Tasks 7.7–7.9 complete lifecycle, deletion, PostgreSQL proof, and documentation.
+
+#### Stage 7 fixed Task contract
+
+- Persist exactly `id`, `user_id`, `project_id`, `title`, `description`, `status`,
+  `priority`, `planned_date`, `due_at`, `estimated_minutes`, `completed_at`,
+  `created_at`, and `updated_at`. IDs are PostgreSQL UUIDs; `id` uses
+  `gen_random_uuid()`. `user_id` and `project_id` are required internal ownership
+  values and never appear in model-controlled input.
+- `title` is trimmed, required, and 1–300 Unicode characters. `description` is
+  nullable, trimmed, limited to 5,000 characters, and canonicalizes blank text to
+  null. `estimated_minutes` is nullable and, when present, is an integer from 1
+  through 1,440 inclusive.
+- Status is exactly `TODO`, `IN_PROGRESS`, `COMPLETED`, or `CANCELLED`; the server
+  default is `TODO`. Priority is exactly `LOW`, `MEDIUM`, `HIGH`, or `URGENT`; the
+  server default is `MEDIUM`. Create input cannot override status or
+  `completed_at`.
+- `planned_date` is a nullable calendar date. `due_at` is a nullable timezone-aware
+  instant normalized to UTC. With no user-timezone setting in the accepted
+  architecture, "start of planned date" means `00:00:00 UTC`; when both values
+  exist, `due_at` must be at or after that instant. `created_at`, `updated_at`, and
+  `completed_at` are timezone-aware UTC values.
+- `completed_at` is non-null exactly while status is `COMPLETED`. The dedicated
+  completion action changes a non-completed Task to `COMPLETED` and assigns the
+  server clock. Repeating completion is read-only and preserves the original
+  timestamp. Leaving `COMPLETED` through an accepted status update clears
+  `completed_at`. Repeating any effective status/value is a no-op with no write,
+  commit, or timestamp change.
+- Allowed non-completed transitions are `TODO <-> IN_PROGRESS`, either of those
+  to `CANCELLED`, and `CANCELLED -> TODO`. The completion action accepts
+  `TODO`, `IN_PROGRESS`, or `CANCELLED`. A completed Task may reopen to `TODO`,
+  `IN_PROGRESS`, or `CANCELLED`; direct PATCH to `COMPLETED` is rejected because
+  the server-owned completion timestamp belongs to the action.
+- Every lookup contains authenticated `user_id`. Create first resolves the
+  Project through an owner-scoped query. Storage uses a named composite ownership
+  foreign key from `(project_id, user_id)` to a named unique Project key
+  `(id, user_id)`, plus the direct User foreign key, so non-HTTP writes cannot
+  attach a Task to another user's Project. Missing and foreign-owned Project/Task
+  inputs share fixed safe 404 messages and reveal no owner.
+- Public Task fields are `id`, `project_id`, `title`, `description`, `status`,
+  `priority`, `planned_date`, `due_at`, `estimated_minutes`, `completed_at`,
+  `created_at`, and `updated_at`. Internal `user_id` is excluded. Including
+  `project_id` is safe because Project access is independently owner-scoped.
+- Pagination uses `page=1`, `page_size=20`, minimum 1 and maximum 100. Filters are
+  `project_id`, `status`, `priority`, `planned_from`, `planned_to`, `due_from`,
+  `due_to`, `overdue`, and bounded trimmed `title` search. Range starts must not
+  exceed range ends. Overdue means `due_at < now UTC` and status is neither
+  `COMPLETED` nor `CANCELLED`.
+- Sort fields are allowlisted to `created_at`, `updated_at`, `due_at`,
+  `planned_date`, and `title`; direction is `asc` or `desc`. The default is
+  `created_at desc`. Every sort appends `id` in the same direction as a stable
+  tie-breaker; null date/instant values use explicit PostgreSQL `NULLS LAST`.
+- Task deletion is owner-scoped hard deletion returning HTTP 204 with no body.
+  This follows `docs/requirements.md`, which explicitly specifies Task deletion
+  and deliberately defers soft deletion. There is no Task archive/restore field
+  or endpoint in Stage 7.
+- The first Stage 7 migration has `down_revision = "4d8c7a1b2e90"`. It may add
+  the named `(id, user_id)` Project unique key required by the composite Task
+  ownership foreign key, but it never edits the accepted Project migration.
+  Task constraints/indexes are named and the migration is reversible.
+
+### Task 7.1 — Task decisions, ORM model, ownership constraints, and reversible migration
+
+**Estimated time:** 1–2 focused hours. **Real PostgreSQL:** required.
+
+**Goal:** Add the complete fixed Task storage contract and one reversible
+migration, without Schema, Service, Repository, or HTTP behavior.
+
+**Prerequisites:** Stage 6 is accepted and committed; the worktree is clean;
+`4d8c7a1b2e90` is the only Alembic head; no Task model or migration exists.
+
+**Files:** Add `app/models/task.py`, minimally update model/metadata exports, add
+exactly one revision under `alembic/versions/`, and add focused model and
+`tests/integration/test_task_migration.py` coverage.
+
+**Implementation scope:** Map only the thirteen fixed fields. Add named primary,
+User foreign key, composite Project ownership foreign key, status/priority/title,
+estimate, due/planned-date, and completed/status checks. Add the supporting named
+Project `(id, user_id)` unique key in this new migration and ORM metadata. Add
+only query-driven indexes for owner, Project, status, priority, due date, and the
+default owner/created/id order. Downgrade removes Tasks and the new supporting
+Project unique key while retaining Projects and Users.
+
+**Explicitly not included:** No Pydantic Schema, Repository, Service, Router,
+Task seed data, tags, recurrence, Agent code, or second migration. Do not edit
+the Stage 6 migration.
+
+**Automated tests:** Prove exact columns/types/nullability/defaults, enum/check
+texts, all object names, metadata discovery, linear revision chain, upgrade from
+`4d8c7a1b2e90`, downgrade back to it, and re-upgrade without drift.
+
+**Real validation commands:** Run focused model tests; on guarded `postgres-test`
+run `alembic upgrade <new-revision>`, inspect Tasks and the supporting Project
+key, downgrade `4d8c7a1b2e90`, re-upgrade, then `alembic current`, `heads`, and
+`check`; finish with Ruff, mypy, lock, and diff checks.
+
+**Acceptance criteria:** One new head exists; PostgreSQL enforces all fixed field
+and ownership invariants; downgrade removes only Stage 7 objects; existing Stage
+6 tests remain green.
+
+**Learning points:** Composite ownership foreign keys; database checks versus
+service rules; reversible migration boundaries.
+
+**Stop boundary:** Stop with Task storage only. Do not create Task schemas or
+persistence/application operations.
+
+### Task 7.2 — Strict create/update/public/list schemas and bounded inputs
+
+**Estimated time:** 1–2 focused hours. **Real PostgreSQL:** not required.
+
+**Goal:** Define strict Task request, public response, filter, and page contracts.
+
+**Prerequisites:** Task 7.1 is accepted; persisted fields and enums are fixed.
+
+**Files:** Add `app/schemas/task.py`, update schema exports only if the current
+style requires it, and add `tests/test_task_schemas.py`.
+
+**Implementation scope:** Add `TaskCreate`, `TaskUpdate`, `PublicTask`,
+`TaskListQuery`, and `TaskListResponse`. Create accepts only `project_id`, title,
+description, planned/due values, estimate, and priority. Update retains missing
+versus explicit null, accepts editable fields and non-completed status, rejects
+empty input and internal fields, and does not implement the completion action.
+Normalize strings, aware datetimes, UTC, bounds, ranges, filters, sort field, and
+direction exactly as the fixed contract states. Public schemas use explicit
+allowlists and `from_attributes`.
+
+**Explicitly not included:** No database query, ownership lookup, transaction,
+Router, completion Service, deletion, or Agent Tool.
+
+**Automated tests:** Cover every field allowlist; title/description/estimate
+boundaries; extra/internal fields; aware/naive due times; UTC output; date order;
+missing versus null; enum values; direct `COMPLETED` rejection; page limits;
+filter ranges; title bound; sort allowlist/direction; ORM serialization; and
+absence of `user_id`.
+
+**Real validation commands:** Run `pytest tests/test_task_schemas.py` and affected
+model/schema regression, then Ruff, format, mypy, lock, and diff checks.
+
+**Acceptance criteria:** Invalid input fails safely before persistence; valid
+input is canonical and bounded; public dict/JSON/OpenAPI-ready shapes never
+contain ownership or internal fields.
+
+**Learning points:** PATCH missing-versus-null semantics; validation at external
+boundaries; stable pagination/filter schemas.
+
+**Stop boundary:** Stop with connection-free contracts. Do not implement Task
+Repository, Service, or routes.
+
+### Task 7.3 — Owned Repository, create Service, and transaction tests
+
+**Estimated time:** 1–2 focused hours. **Real PostgreSQL:** focused repository
+integration is optional here; final proof belongs to Task 7.9.
+
+**Goal:** Build the reusable ownership-safe Task persistence core and create use
+case used later by HTTP and Agent tools.
+
+**Prerequisites:** Tasks 7.1–7.2 are accepted; Project ownership and Task schemas
+are stable.
+
+**Files:** Add `app/repositories/tasks.py`, `app/services/tasks.py`, safe Task and
+Project-not-found domain exceptions as needed, and focused repository/service
+tests.
+
+**Implementation scope:** The Repository receives a caller-owned synchronous
+Session, performs owner-scoped Project/Task queries, and uses `add`/`flush`
+without commit/rollback. The create Service derives `user_id`, proves the Project
+belongs to it, hashes no secrets, commits once on success, rolls back unexpected
+write failures, and returns `PublicTask`. Missing/foreign Project uses the same
+safe absence. Design repository methods needed by later read/update/list/delete
+tasks without implementing their use cases early.
+
+**Explicitly not included:** No HTTP, pagination implementation, update/completion
+state machine, deletion, new migration, or Agent Tool.
+
+**Automated tests:** Inspect compiled ownership predicates; prove create receives
+the trusted owner and owned Project; Repository receives no client owner; only
+hash-free public data returns; success commits once; pre-write absence is
+transaction-neutral; persistence failure rolls back and propagates; Repository
+never commits or raises HTTP errors.
+
+**Real validation commands:** Run Task repository/service focused tests and
+Project regression, then full ordinary pytest, Ruff, format, mypy, lock, and diff.
+
+**Acceptance criteria:** A validated Task can be created only below an owned
+Project through one caller Session and one Service-owned transaction; no public
+HTTP path exists yet.
+
+**Learning points:** Defense-in-depth ownership; caller-owned Session contracts;
+Service transaction orchestration.
+
+**Stop boundary:** Stop after the non-HTTP create core. Do not expose routes or
+implement list/update/complete/delete use cases.
+
+### Task 7.4 — Create and retrieve Task HTTP endpoints
+
+**Estimated time:** 1–2 focused hours. **Real PostgreSQL:** not required until
+Task 7.9.
+
+**Goal:** Expose authenticated Task creation and owner-scoped detail retrieval.
+
+**Prerequisites:** Tasks 7.1–7.3 are accepted and committed; no Task route exists.
+
+**Files:** Add the project-consistent Task endpoint module, include it in the v1
+Router, minimally update strict route tests, and add focused Task API tests.
+
+**Implementation scope:** Add `POST /api/v1/tasks` returning 201 `PublicTask` and
+`GET /api/v1/tasks/{task_id}` returning 200. Both reuse the Bearer dependency and
+the same request-scoped synchronous Session. Router delegates to Services and
+maps missing/foreign Task or Project to fixed safe 404 responses. Malformed UUID
+and strict request errors remain 422.
+
+**Explicitly not included:** No list, PATCH, complete, reopen, DELETE, tags,
+Project route changes, or Agent endpoint.
+
+**Automated tests:** Cover thin delegation, trusted `current_user.id`, same
+Session, 201/200 allowlists, 401 challenge, 404 isolation, 422, forbidden
+`user_id`/status/completed timestamp, exact OpenAPI methods, and Stage 6 route
+compatibility.
+
+**Real validation commands:** Run Task API focused and strict main/OpenAPI tests,
+then affected authentication/Project regression, Ruff, format, mypy, lock, diff.
+
+**Acceptance criteria:** Public authenticated create/detail routes match the
+fixed contract and cannot reveal or accept ownership internals.
+
+**Learning points:** Bearer dependency reuse; Router/Service error mapping;
+response allowlists.
+
+**Stop boundary:** Stop after create and detail. Do not add list, update,
+completion, or deletion routes.
+
+### Task 7.5 — Stable pagination, filters, overdue query, and sort allowlist
+
+**Estimated time:** 1–2 focused hours. **Real PostgreSQL:** final query proof in
+Task 7.9.
+
+**Goal:** Add bounded owner-scoped Task listing with deterministic query behavior.
+
+**Prerequisites:** Task 7.4 is accepted; query Schema is fixed.
+
+**Files:** Extend existing Task Repository, Service, endpoint, and their focused
+tests; do not create parallel implementations.
+
+**Implementation scope:** Add `GET /api/v1/tasks` using the fixed page, filters,
+overdue definition, allowlisted sort fields/direction, explicit null ordering,
+and ID tie-breaker. List and count statements share identical owner/filter
+predicates. The Service injects an aware UTC `now` for deterministic overdue
+tests and builds exact page metadata.
+
+**Explicitly not included:** No arbitrary SQL sort, client `user_id`, update,
+completion, deletion, full-text engine, or Agent Tool.
+
+**Automated tests:** Prove compiled owner predicates; every filter alone and in
+combination; title escaping/search behavior; overdue boundaries; range rejection;
+stable sort/tie-breaker/null order; page totals; no duplicates/omissions; 401;
+strict query parameters; and public allowlists.
+
+**Real validation commands:** Run focused Task repository/service/API listing
+tests and Project pagination regression, then Ruff, format, mypy, lock, diff.
+
+**Acceptance criteria:** Listing is bounded, deterministic, owner-isolated, and
+has no route from user input to arbitrary SQL identifiers.
+
+**Learning points:** Stable database pagination; allowlisted dynamic ordering;
+clock injection for overdue rules.
+
+**Stop boundary:** Stop after read/list behavior. Do not implement PATCH,
+completion, reopen, or DELETE.
+
+### Task 7.6 — Field updates and deadline invariants
+
+**Estimated time:** 1–2 focused hours. **Real PostgreSQL:** final proof in Task
+7.9.
+
+**Goal:** Add strict owner-scoped Task field updates while preserving date and
+transaction invariants.
+
+**Prerequisites:** Tasks 7.1–7.5 are accepted; update Schema semantics are fixed.
+
+**Files:** Extend existing Task Repository, Service, endpoint, exceptions, and
+focused tests.
+
+**Implementation scope:** Add `PATCH /api/v1/tasks/{task_id}`. Combine supplied
+fields with persisted state before checking planned/due order. Allow clearing
+description, planned date, due instant, and estimate; require non-null title,
+priority, and status. Handle non-completed transitions now; preserve
+`completed_at` rules for Task 7.7. Actual writes advance UTC `updated_at` and
+commit once; no-op returns without write/commit; write failures roll back.
+
+**Explicitly not included:** No direct `COMPLETED`, completion timestamp supplied
+by clients, delete/archive, optimistic locking, or new migration.
+
+**Automated tests:** Cover every editable field; explicit null/missing; combined
+persisted dates; boundaries; owner/missing 404; invalid transition/input 422 or
+documented safe domain error; actual commit/timestamp; no-op neutrality; rollback;
+same Session; and OpenAPI contract.
+
+**Real validation commands:** Run Task update Schema/Service/API focused tests and
+Project update regression, then full ordinary pytest, Ruff, format, mypy, lock,
+and diff.
+
+**Acceptance criteria:** Only owned Tasks change; post-update state always
+satisfies dates and non-completed lifecycle rules; transaction ownership remains
+in the Service.
+
+**Learning points:** Persisted-plus-patch validation; idempotent write avoidance;
+safe domain errors versus HTTP mapping.
+
+**Stop boundary:** Stop after ordinary field/deadline updates. Do not add the
+completion action, deletion, PostgreSQL final suite, or Agent code.
+
+### Task 7.7 — Idempotent completion and reopen transitions
+
+**Estimated time:** 1–2 focused hours. **Real PostgreSQL:** final proof in Task
+7.9.
+
+**Goal:** Complete the Task state machine with server-owned completion time.
+
+**Prerequisites:** Task 7.6 is accepted; ordinary PATCH and clocks are testable.
+
+**Files:** Extend the existing Task Service/endpoint/schema validation and
+focused lifecycle tests; add no parallel state-machine module without need.
+
+**Implementation scope:** Add `POST /api/v1/tasks/{task_id}/complete`. First
+completion assigns an injected aware UTC clock, sets `COMPLETED`, advances
+`updated_at`, and commits once. Repeated completion performs no write, clock read,
+or commit. Extend PATCH so a completed Task may move to TODO, IN_PROGRESS, or
+CANCELLED while atomically clearing `completed_at`; repeated status values remain
+no-ops. Database checks remain the final status/timestamp defense.
+
+**Explicitly not included:** No client `completed_at`, bulk completion, recurrence,
+study-duration accounting, notifications, or Agent execution.
+
+**Automated tests:** Cover every allowed transition, rejected direct completed
+PATCH, first/repeated completion, reopen timestamp clearing, no-op clocks,
+commit/rollback, owner 404, 401, response fields, OpenAPI, and failure safety.
+
+**Real validation commands:** Run lifecycle Service/API focused tests and update
+regression, then Ruff, format, mypy, lock, and diff.
+
+**Acceptance criteria:** `completed_at` and status cannot disagree through public
+use cases; repeated operations are demonstrably transaction-neutral.
+
+**Learning points:** Explicit state machines; server-owned timestamps; semantic
+idempotency.
+
+**Stop boundary:** Stop after completion/reopen behavior. Do not implement DELETE
+or final PostgreSQL/documentation work.
+
+### Task 7.8 — Owner-scoped safe hard deletion
+
+**Estimated time:** 1–2 focused hours. **Real PostgreSQL:** final isolation proof
+in Task 7.9.
+
+**Goal:** Implement the requirements-defined Task hard deletion without resource
+enumeration or hidden soft-delete semantics.
+
+**Prerequisites:** Task 7.7 is accepted; ownership lookup and write transactions
+are stable.
+
+**Files:** Extend the existing Task Repository, Service, endpoint, strict route
+tests, and focused delete tests.
+
+**Implementation scope:** Add `DELETE /api/v1/tasks/{task_id}` returning 204 and
+no body. Repository locates/deletes only `(task_id, user_id)` and flushes without
+commit. Service commits successful deletion and rolls back failures. Missing and
+foreign-owned Tasks return the same safe 404. Deletion removes only the Task;
+there are no Stage 7 dependent records.
+
+**Explicitly not included:** No archive flag, soft delete, restore, cascade into
+future records, batch delete, Project delete, approval flow, or Agent Tool.
+
+**Automated tests:** Cover 204/no body, exact owner predicate, missing/foreign
+404 equality, malformed ID, 401, success commit, failure rollback, Repository
+transaction neutrality, record removal, strict OpenAPI method, and absence of
+archive/restore paths.
+
+**Real validation commands:** Run focused delete Repository/Service/API tests and
+all Task route tests, then full ordinary pytest, Ruff, format, mypy, lock, diff.
+
+**Acceptance criteria:** An authenticated user can permanently delete only their
+own Task; no response or route reveals foreign ownership; no soft-delete state
+exists.
+
+**Learning points:** HTTP 204 semantics; secure hard deletion; ownership-scoped
+destructive writes.
+
+**Stop boundary:** Stop after Task DELETE. Do not start integration documentation,
+Stage 8 tools, or any bulk/high-impact delete workflow.
+
+### Task 7.9 — Real PostgreSQL isolation/invariant integration and documentation
+
+**Estimated time:** 1–2 focused hours. **Real PostgreSQL:** required.
+
+**Goal:** Prove the complete Task API, ownership, state machine, queries,
+transactions, database invariants, migration round trip, and operator contract.
+
+**Prerequisites:** Tasks 7.1–7.8 are accepted; ordinary tests pass; exactly one
+Task migration exists; no unresolved Task defect remains.
+
+**Files:** Add narrowly scoped `tests/integration/test_tasks.py`, minimally extend
+safe integration fixtures only when necessary, and update README Stage 7 usage.
+Normative docs change only to correct a demonstrated conflict.
+
+**Implementation scope:** Through real Bearer HTTP requests and independent
+synchronous Sessions, prove create/detail/list/filter/sort/update/complete/reopen/
+delete, two-user isolation, no-op behavior, exact cleanup, and safe errors. Use
+direct controlled writes to prove every named Task constraint and the composite
+Project ownership key. From an empty guarded `postgres-test`, upgrade to the Task
+head, downgrade to `4d8c7a1b2e90` while retaining Users/Projects, re-upgrade,
+inspect objects, and run `alembic check`. Document fields, routes, filters, state
+transitions, deletion, transactions, ownership, and explicit omissions.
+
+**Explicitly not included:** No new migration, schema redesign, SQLite substitute,
+tags, study sessions, recurrence, collaboration, reminders, Stage 8 dependency,
+LLM call, Tool, or Agent code.
+
+**Automated tests:** Cover all public success/failure/boundary paths; two users
+and two Projects; stable multi-page results; every filter/sort; due/overdue clock;
+status/completed invariants; first/repeated completion; reopen; delete; exact
+cleanup; Session closure; named database constraint diagnostics kept out of API;
+and migration structure/round trip.
+
+**Real validation commands:** Run locked sync, focused Task ordinary tests, full
+ordinary and warnings suites; safely start only `postgres-test`; validate its
+identity; run migration round trip, focused Task integration, full integration,
+`alembic current/heads/check`; then Ruff, format, mypy, lock, diff, and stop only
+`postgres-test` without deleting volumes.
+
+**Acceptance criteria:** All Task operations traverse Router -> Service ->
+Repository -> real PostgreSQL; cross-user data is unobservable; constraints and
+transactions hold; public output has no internal owner or sensitive data; docs
+match OpenAPI; the Task migration is reversible and drift-free.
+
+**Learning points:** End-to-end ownership proof; state-machine/database invariant
+alignment; migration and documentation as executable contracts.
+
+**Stop boundary:** Task 7.9 completes Stage 7. Stop for owner confirmation. Do
+not begin Stage 8 provider settings, model SDK, Agent tools, or empty Agent trees.
 
 Do not add tags, study sessions, recurrence, collaboration, reminders, or Agent
-execution before this domain API is stable.
+execution before this domain API is stable. Stage 7 deliberately ends with hard
+deletion rather than archive/restore because the accepted requirements defer
+soft deletion until a demonstrated recovery need exists.
 
 ### Stage 8 — LLM foundation and Agent tools
 

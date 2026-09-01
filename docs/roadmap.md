@@ -2885,23 +2885,490 @@ soft deletion until a demonstrated recovery need exists.
 
 ### Stage 8 — LLM foundation and Agent tools
 
-Build a transparent minimum Agent loop before LangGraph. Select the provider and
-maintained SDK only when Task 8.1 confirms Python compatibility; do not build a
-general provider framework for hypothetical vendors.
+Build a transparent, replaceable, and testable minimum Agent foundation before
+LangGraph. The bounded path is:
 
-- **Task 8.1:** Secret-aware provider/model settings and one replaceable adapter.
-- **Task 8.2:** Versioned prompts plus strict Pydantic goal/plan/result schemas.
-- **Task 8.3:** Structured output with timeout, retry, and safe error mapping.
-- **Task 8.4:** Read tools `list_projects` and `list_tasks` through Services.
-- **Task 8.5:** Write tools `create_task` and `update_task` through Services.
-- **Task 8.6:** Minimal bounded tool-calling loop and internal CLI/test entry.
-- **Task 8.7:** Streaming model-response foundation and safe progress events.
-- **Task 8.8:** Token/latency metrics, prompt versions, fakes, and separately
-  marked external-provider smoke tests.
+```text
+Validated goal
+    -> versioned prompt
+    -> replaceable model provider
+    -> strict structured output
+    -> allowlisted Agent tool
+    -> existing Domain Service
+    -> owner-scoped Repository
+    -> PostgreSQL
+    -> bounded public result
+```
 
-Tool schemas exclude `user_id`; trusted authentication/run context supplies it.
-Tools never receive Sessions or import repositories. Ordinary tests use a fake
-provider and never require an external API key.
+Stage 8 is split into three reviewable result milestones: Tasks 8.1–8.3 produce
+one strict structured study plan through one verified provider adapter; Tasks
+8.4–8.5 expose independently testable read/write tools backed by existing
+Services; Tasks 8.6–8.8 combine those pieces into a bounded internal loop with
+safe progress events and metrics. Each Task retains its own focused tests and
+stop boundary.
+
+Task 8.1 must select the provider and maintained SDK only after checking official
+documentation for Python 3.14 support, current maintenance, structured output,
+tool calling, streaming, timeouts, retries, and usage metadata. If the chosen SDK
+cannot meet the required contract, stop and report the evidence rather than
+installing it. Implement one narrow adapter and one Protocol, not a framework for
+hypothetical providers.
+
+Tool schemas never contain `user_id`; a trusted runtime context injects identity
+outside model-controlled arguments. Tools do not receive Sessions, import
+repositories, or own transactions. Agent runtime state and events contain only
+serializable values, never Sessions, connections, ORM objects, provider clients,
+keys, complete prompts, hidden reasoning, or complete sensitive tool payloads.
+Ordinary tests use deterministic fakes and never require network access or an API
+key. External-provider tests are separately marked and explicitly opted into.
+Stage 8 keeps the synchronous SQLAlchemy architecture and creates no migration.
+
+### Task 8.1 — Secret-aware provider settings and one replaceable adapter
+
+**Estimated time:** 1–2 focused hours. **Network:** required only for official
+documentation/package resolution during implementation. **External credential:**
+not required for ordinary acceptance. **Real PostgreSQL:** not required.
+
+**Goal:** Establish one evidence-selected model SDK behind a minimal replaceable
+interface, with fail-fast secret-aware configuration and no provider details in
+the rest of the application.
+
+**Prerequisites:** Stage 7 is accepted; the worktree is clean; Python 3.14 and the
+locked toolchain work; no Agent package or model dependency already exists.
+
+**Files:** `pyproject.toml`, `uv.lock`, `.env.example`, `app/core/config.py`, new
+`app/agent/__init__.py`, new `app/agent/providers.py`, and focused
+`tests/test_agent_config.py` and `tests/test_agent_provider.py`. Add no empty
+Agent subpackages.
+
+**Implementation scope:** Record the provider-selection evidence in the Task
+report; add only the selected official/maintained SDK. Add `STMS_MODEL_PROVIDER`,
+`STMS_MODEL_NAME`, and `STMS_MODEL_API_KEY` settings, with the key represented by
+`SecretStr`, no default key, non-blank bounded provider/model names, and hidden
+input in validation errors. Define typed serializable request/response and usage
+records plus one small provider Protocol. Implement one adapter that translates
+those records to the selected SDK and supports the structured-output, tool-call,
+streaming, timeout, and usage capabilities needed by later Tasks without exposing
+SDK objects beyond the adapter. Construction fails safely when required settings
+are absent; importing the ordinary application must not require a key.
+
+**Interfaces and contracts:** Provider input contains a prompt version, bounded
+messages/instructions, an optional strict output schema, an allowlisted tool
+catalog, and timeout metadata. Provider output contains validated text or tool
+calls plus normalized usage data; it never contains credentials. The Protocol is
+the only dependency consumed by Stage 8 orchestration and is implementable by a
+deterministic fake.
+
+**Explicitly not included:** No second provider, routing/fallback framework,
+prompt templates, model call from an HTTP route, tool implementation, Agent loop,
+LangGraph, AsyncSession, persistence, streaming endpoint, or real-key test.
+
+**Automated tests:** Cover defaults and bounds, absent/short/blank settings,
+SecretStr masking in `repr`, `str`, and validation errors, lazy construction,
+adapter request/response normalization with an SDK fake, usage normalization,
+SDK exception redaction, and proof that ordinary tests/imports make no network
+call and need no key.
+
+**Focused validation commands:** Run the provider/config focused tests, `uv lock
+--check`, Ruff, format check, mypy, and `git diff --check`. Do not start Docker.
+
+**Acceptance criteria:** One compatible dependency is locked without unrelated
+upgrades; secret/model settings fail safely; provider-specific types stop at the
+adapter; a deterministic fake satisfies the same Protocol; no secret or complete
+model payload appears in output or errors.
+
+**Learning points:** Dependency selection from primary evidence; secret-aware
+configuration; ports/adapters as a test seam.
+
+**Stop boundary:** Stop after settings, Protocol, and one adapter. Do not add
+prompts, planning schemas, actual model orchestration, tools, or LangGraph.
+
+### Task 8.2 — Versioned prompts and strict goal/plan/result schemas
+
+**Estimated time:** 1–2 focused hours. **Network/external credential/real
+PostgreSQL:** not required.
+
+**Goal:** Define the complete validated boundary for a study-planning request and
+its model-produced plan before any orchestration calls a provider.
+
+**Prerequisites:** Task 8.1 is accepted; its Protocol is stable; no real provider
+call is required by tests.
+
+**Files:** New `app/agent/prompts.py`, new `app/agent/schemas.py`, focused
+`tests/test_agent_prompts.py` and `tests/test_agent_schemas.py`, and only necessary
+exports in `app/agent/__init__.py`.
+
+**Implementation scope:** Add an immutable prompt identifier such as
+`study-plan.v1` and a deterministic builder that separates trusted instructions
+from the validated user goal. Define strict Pydantic 2 models with
+`extra="forbid"` and hidden inputs: `PlanningGoal` with one trimmed objective of
+1–2000 characters and at most 20 constraints of 1–500 characters;
+`StudyPlanStep` with a stable bounded step key, position, title, description, and
+success criteria; `StudyPlan` with a safe summary and 1–20 uniquely positioned
+steps; and `PlanningResult` with prompt version, status, and the plan. Normalize
+only documented text whitespace; do not interpret model prose as code or policy.
+
+**Interfaces and contracts:** Prompts contain the version and the exact JSON
+schema contract, ask only for a user-owned learning plan, and prohibit fabricated
+database facts or hidden reasoning. Results are serializable Pydantic values and
+carry no provider client, ORM object, Session, key, raw token, or chain-of-thought.
+
+**Explicitly not included:** No provider call, tool name/arguments, project/task
+write, prompt persistence, conversation memory, LangGraph state, RAG context,
+approval, HTTP/CLI endpoint, or database change.
+
+**Automated tests:** Cover every length/count boundary; trimming and blank
+rejection; extra fields; duplicate/missing/out-of-order positions; timezone- and
+JSON-safe serialization where applicable; prompt version stability; deterministic
+prompt building; hostile text remaining untrusted data; and absence of secrets,
+tool arguments, hidden reasoning, or internal objects from dumps and errors.
+
+**Focused validation commands:** Run the prompt/schema focused tests, then Ruff,
+format check, mypy, lock check, and diff check. Do not start Docker or call a
+provider.
+
+**Acceptance criteria:** The same validated goal always builds the same versioned
+prompt; malformed or oversized plans fail closed; a valid result round-trips
+through JSON; all public fields are explicit allowlists.
+
+**Learning points:** Structured output as an API boundary; prompt versioning;
+untrusted user/model text handling.
+
+**Stop boundary:** Stop after pure prompts and schemas. Do not call the adapter,
+add retry logic, tool schemas, an Agent loop, or LangGraph.
+
+### Task 8.3 — Structured planning with timeout, retry, and safe errors
+
+**Estimated time:** 1–2 focused hours. **Network/external credential/real
+PostgreSQL:** not required for acceptance.
+
+**Goal:** Produce one strict `PlanningResult` through the provider Protocol with
+deterministic retry bounds and safe application-level failures.
+
+**Prerequisites:** Tasks 8.1–8.2 are accepted; the provider port, fake, prompt,
+and schemas are stable.
+
+**Files:** New `app/agent/planning.py`, extend `app/agent/providers.py` and
+`app/core/exceptions.py` only as required, plus focused
+`tests/test_agent_planning.py` and provider regression tests.
+
+**Implementation scope:** Add a pure orchestration function/service that validates
+the goal, builds the versioned prompt, requests the exact `PlanningResult` schema,
+and returns only the validated result. Use a 30-second per-attempt timeout and at
+most two total attempts. Retry once only for a timeout, explicitly classified
+transient provider failure, or invalid structured response; do not retry missing
+configuration, authentication/permission failures, or deterministic input errors.
+Map exhausted/unsafe provider failures to stable local exception classes with
+fixed messages that omit prompts, raw responses, SDK diagnostics, keys, and
+complete model output.
+
+**Interfaces and contracts:** Clock/sleeper/provider dependencies are injectable;
+ordinary tests remain instantaneous and offline. Retry count and timeout are
+bounded constants for this Task, not user-controlled inputs. A failed attempt
+cannot return partial model data as a valid plan.
+
+**Explicitly not included:** No fallback provider, unbounded exponential retry,
+tool call, Session, database access, Router, CLI, streaming, metrics persistence,
+LangGraph, or external-provider acceptance requirement.
+
+**Automated tests:** Cover first-attempt success; one transient/timeout/schema
+retry then success; exhaustion after exactly two attempts; non-retryable failure;
+invalid goal before provider use; exact prompt/schema/version forwarding; fake
+call counts; timeout forwarding; safe exceptions; and absence of keys, prompts,
+raw responses, complete model output, or hidden reasoning in logs/errors.
+
+**Focused validation commands:** Run Tasks 8.1–8.3 focused tests, then the full
+ordinary suite, Ruff, format check, mypy, lock check, and diff check. No Docker or
+external model call is required.
+
+**Acceptance criteria:** A deterministic fake proves a validated goal can become
+one strict versioned plan; all calls terminate within exact attempt bounds; unsafe
+or malformed provider output fails closed without secret disclosure.
+
+**Learning points:** Bounded resilience; exception classification; validation at
+an untrusted model boundary.
+
+**Stop boundary:** Tasks 8.1–8.3 form the first Stage 8 result milestone. Stop for
+review; do not add tools, database access, a loop, streaming, or LangGraph.
+
+### Task 8.4 — Service-backed read tools for Projects and Tasks
+
+**Estimated time:** 1–2 focused hours. **External model/network:** not required.
+**Real PostgreSQL:** deferred to the Stage 8 final verification unless a focused
+test demonstrates a database-specific defect.
+
+**Goal:** Expose `list_projects` and `list_tasks` as strict, bounded Agent tools
+that reuse existing owner-scoped Domain Services without giving the model an
+identity, Session, or persistence primitive.
+
+**Prerequisites:** Task 8.3 is accepted; Stage 6/7 list Schemas and Services are
+stable; trusted runtime identity semantics are understood.
+
+**Files:** New `app/agent/context.py` and `app/agent/tools.py`, new
+`app/services/agent_domain.py` only for the narrow runtime-to-Service boundary,
+focused `tests/test_agent_read_tools.py`, and necessary Agent exports.
+
+**Implementation scope:** Define an immutable trusted runtime context containing
+the authenticated `user_id` outside all model schemas. Define strict read-tool
+arguments that reuse the existing pagination/filter bounds but contain no
+`user_id`, Session, repository, SQL, or arbitrary sort field. A small domain
+service gateway creates/closes a synchronous Session through the existing factory
+and delegates to `list_owned_projects` or `list_owned_tasks`; tools invoke only
+that gateway and return bounded public-schema data. Read calls do not commit.
+
+**Interfaces and contracts:** The allowlist has exactly `list_projects` and
+`list_tasks`. Tool descriptions and JSON schemas are deterministic and safe to
+send to a model. Runtime context is injected by trusted application code and is
+not serialized into tool arguments or Agent state.
+
+**Explicitly not included:** No create/update/delete/complete/archive Tool,
+repository import from a Tool, caller/model-selected owner, raw ORM output,
+provider call, public Agent route, LangGraph, RAG, approval, or AsyncSession.
+
+**Automated tests:** Cover exact tool names/schemas; absence and rejection of
+`user_id`/extra fields; pagination/filter boundaries; trusted identity forwarding;
+existing Service invocation; public field allowlists; cross-user isolation via
+Service fakes; Session creation/closure; no commit on reads; safe domain errors;
+and static import-boundary assertions that Tools do not import repositories or
+SQLAlchemy.
+
+**Focused validation commands:** Run read-tool, Project list, Task list, and
+Session focused tests, then Ruff, format check, mypy, lock, and diff. Ordinary
+acceptance uses no provider or Docker.
+
+**Acceptance criteria:** The model can request only bounded Project/Task reads;
+trusted identity is always injected; Tool code cannot access a Session or
+repository; outputs match existing public contracts.
+
+**Learning points:** Capability-safe tool schemas; trusted context injection;
+reusing domain authorization across entry points.
+
+**Stop boundary:** Stop after the two read tools. Do not add write tools, a loop,
+public endpoint, approval flow, or LangGraph.
+
+### Task 8.5 — Service-backed write tools for Task creation and update
+
+**Estimated time:** 1–2 focused hours. **External model/network:** not required.
+**Real PostgreSQL:** final proof may reuse the guarded Stage 7 database suite.
+
+**Goal:** Expose only `create_task` and `update_task` through the same existing
+Task Service rules and transactions while keeping ownership outside model input.
+
+**Prerequisites:** Task 8.4 is accepted; read-tool context/gateway boundaries are
+stable; existing Task create/update behavior is fully tested.
+
+**Files:** Extend `app/agent/tools.py`, `app/services/agent_domain.py`, and Agent
+exports; add focused `tests/test_agent_write_tools.py` and minimal read-tool/Task
+Service regression adjustments only when contracts require them.
+
+**Implementation scope:** Add strict arguments equivalent to the existing
+`TaskCreate` and `TaskUpdate` public edit fields, plus `task_id` for update, but
+never `user_id`, Session, transaction flags, timestamps owned by the server, or
+arbitrary fields. The runtime gateway opens/closes one synchronous Session and
+calls `create_task` or `update_owned_task` with trusted identity. Existing
+Services retain commit/rollback and ownership/date/state rules; Tools only
+validate, delegate, and return `PublicTask`. Unknown tools and invalid arguments
+fail before a Session is opened.
+
+**Interfaces and contracts:** The complete Stage 8 allowlist is now exactly
+`list_projects`, `list_tasks`, `create_task`, and `update_task`. Writes are only
+available when trusted runtime policy enables them; model output alone never
+grants authority. Durable human approval/idempotency arrives in Stage 10.
+
+**Explicitly not included:** No delete, complete action, bulk write, Project
+write, direct commit/rollback in Tools or repositories, arbitrary `user_id`,
+approval persistence, retrying writes, Agent HTTP route, LangGraph, or migration.
+
+**Automated tests:** Cover exact write schemas/allowlist; forbidden owner/internal
+fields; create/update success; validation/date/state failures; foreign/missing
+404 equivalence; trusted identity forwarding; one Session per call and guaranteed
+closure; Service-owned commit/rollback; no Tool retry after a write failure; safe
+public output; and proof that Tools import neither repositories nor SQLAlchemy.
+
+**Focused validation commands:** Run write/read-tool tests plus Task
+Schema/Service/ownership regressions, then the full ordinary suite, Ruff, format,
+mypy, lock, and diff. Use guarded `postgres-test` only if the accepted Task calls
+for real database proof; never use an external model.
+
+**Acceptance criteria:** All four allowlisted Tools are independently executable
+with a fake runtime; writes traverse Tool -> existing Domain Service -> Repository
+-> PostgreSQL contract; no model-controlled value can change ownership or
+transaction policy.
+
+**Learning points:** Command validation; transaction reuse across entry points;
+least-authority write capabilities.
+
+**Stop boundary:** Tasks 8.4–8.5 form the second Stage 8 result milestone. Stop
+for review; do not build the model loop, autonomous retries, streaming, approval,
+or LangGraph.
+
+### Task 8.6 — Minimal bounded tool-calling loop and internal test entry
+
+**Estimated time:** 1–2 focused hours. **Network/external credential/real
+PostgreSQL:** not required for ordinary acceptance.
+
+**Goal:** Combine the provider port, strict plan contracts, and four allowlisted
+tools into one deterministic, terminating internal loop without introducing a
+public Agent API or LangGraph.
+
+**Prerequisites:** Tasks 8.1–8.5 are accepted; provider and tool fakes are stable;
+trusted identity is supplied by runtime code outside model arguments.
+
+**Files:** New `app/agent/loop.py`, a test-only/internal entry in
+`app/agent/testing.py`, necessary Agent exports, and focused
+`tests/test_agent_loop.py`. Do not create a CLI accepting an arbitrary `user_id`;
+the internal test entry is the accepted Stage 8 host boundary.
+
+**Implementation scope:** Execute at most four model rounds, no more than three
+tool calls from one model response, and no more than eight tool calls total.
+Validate every provider result, tool name, and argument schema before dispatch.
+Inject trusted runtime context separately, feed only bounded safe tool results
+back to the provider, and return a strict `PlanningResult` or stable safe failure.
+Unknown tools, duplicate/excess calls, invalid arguments, provider exhaustion,
+or missing final result terminate the run; no `sleep`, recursion, or unbounded
+self-correction is allowed.
+
+**Interfaces and contracts:** Loop input is the validated goal plus trusted
+runtime context and injected provider/tool registry. Loop output and intermediate
+state are JSON-serializable validated records. A tool failure is not retried by
+the loop, especially after a possible write.
+
+**Explicitly not included:** No public Router, arbitrary CLI owner input,
+conversation memory, parallel tool calls, write retry, durable run state,
+approval/interrupt, LangGraph, Checkpoint, SSE, RAG, MCP, or multi-agent behavior.
+
+**Automated tests:** Cover no-tool plan success; read then plan; allowed write;
+unknown/invalid/excess tool calls; exact round/per-response/total limits; provider
+and tool failures; no retry after writes; trusted identity isolation; deterministic
+fake transcripts; serializable state/output; and absence of keys, complete
+prompts/model responses, hidden reasoning, or sensitive tool payloads in errors.
+
+**Focused validation commands:** Run loop, planning, and all Tool focused tests,
+then Ruff, format, mypy, lock, and diff. No Docker or real provider is required.
+
+**Acceptance criteria:** A fake provider can drive one useful bounded plan/tool
+scenario; every branch terminates within fixed limits; only the exact allowlist is
+dispatchable; the model cannot select identity or database primitives.
+
+**Learning points:** Bounded Agent execution; deterministic dispatch; separating
+model suggestions from trusted authority.
+
+**Stop boundary:** Stop after the internal loop. Do not add streaming events,
+metrics, public API, persistence, approval, or LangGraph.
+
+### Task 8.7 — Streaming foundation and safe progress events
+
+**Estimated time:** 1–2 focused hours. **External credential/network/real
+PostgreSQL:** not required for acceptance.
+
+**Goal:** Represent incremental provider/loop progress as a safe, ordered event
+stream without exposing hidden reasoning or committing to Stage 10 SSE transport.
+
+**Prerequisites:** Task 8.6 is accepted; the selected adapter's official streaming
+API and cancellation semantics were verified in Task 8.1.
+
+**Files:** New `app/agent/events.py`, extend `app/agent/providers.py` and
+`app/agent/loop.py` only as necessary, focused `tests/test_agent_events.py` and
+streaming regression in `tests/test_agent_loop.py`/`tests/test_agent_provider.py`.
+
+**Implementation scope:** Define strict serializable progress events with
+monotonic sequence, aware UTC timestamp, allowlisted event kind, stage/tool name
+when applicable, bounded safe summary, outcome, and optional normalized usage.
+Translate provider chunks and loop transitions into events while accumulating
+the same final validated result as the non-streaming path. Redact or reject raw
+prompt/model payloads, complete tool arguments/results, tokens, credentials, and
+chain-of-thought. Ensure cancellation/error closes the provider stream and emits
+at most one terminal safe event.
+
+**Interfaces and contracts:** Event kinds are a fixed enum such as `run_started`,
+`model_started`, `tool_started`, `tool_finished`, `result_ready`, and `run_failed`.
+Transport-neutral iteration is the boundary; Stage 10 maps it to SSE. Consumers
+cannot infer authorization from an event.
+
+**Explicitly not included:** No FastAPI streaming response, SSE wire format,
+WebSocket, background worker, checkpoint, resume, persistent trace, approval,
+hidden reasoning, LangGraph, or real-provider ordinary test.
+
+**Automated tests:** Cover deterministic order/sequence/time; chunk accumulation;
+same final result as non-streaming; tool progress summaries; bounds/redaction;
+cancellation and provider/tool errors; exactly one terminal event; JSON round
+trip; and no secrets, complete tokens, prompts, tool payloads, or chain-of-thought.
+
+**Focused validation commands:** Run event/stream/provider/loop focused tests,
+then Ruff, format, mypy, lock, and diff. No Docker or external key is required.
+
+**Acceptance criteria:** Deterministic fakes produce safe ordered events and one
+validated final result; cancellation releases resources; the event contract can
+later be carried over SSE without exposing model internals.
+
+**Learning points:** Streaming as domain events versus transport; cancellation
+cleanup; observability without reasoning disclosure.
+
+**Stop boundary:** Stop after transport-neutral progress streaming. Do not add an
+HTTP stream, durable runs/checkpoints, approval/resume, or LangGraph.
+
+### Task 8.8 — Metrics, deterministic fakes, and external-provider smoke boundary
+
+**Estimated time:** 1–2 focused hours. **External credential/network:** optional
+and explicitly opt-in only. **Real PostgreSQL:** required only for existing
+service-backed Tool integration regressions, not for model calls.
+
+**Goal:** Complete Stage 8 with normalized token/latency evidence, reusable fakes,
+prompt-version reporting, and a safe separately marked provider smoke test.
+
+**Prerequisites:** Tasks 8.1–8.7 are accepted; no unresolved provider/tool/loop
+defect remains; ordinary tests remain completely offline.
+
+**Files:** New `app/agent/metrics.py`, minimal extensions to Agent result/events,
+new `tests/fakes/agent_provider.py`, focused `tests/test_agent_metrics.py`, new
+`tests/external/test_agent_provider_smoke.py`, `pyproject.toml` only for the
+explicit external marker, and `.env.example`/README only to document already
+implemented non-secret provider settings and opt-in commands.
+
+**Implementation scope:** Normalize per-call and per-run input/output/total token
+counts when the provider supplies them, monotonic latency, attempt count, tool
+count, outcome, and prompt version. Missing provider usage remains explicit
+`None`, never fabricated. Aggregate only safe numeric/enum/version data. Provide
+a scriptable fake with fixed responses, tool calls, chunks, failures, and usage.
+Register an `external_provider` pytest marker excluded from default runs; its one
+smoke test skips safely without explicit credentials and validates only a tiny
+structured response when deliberately enabled. Document that external calls may
+cost money and must use a synthetic prompt.
+
+**Interfaces and contracts:** Metrics are immutable serializable values and do
+not contain goal text, prompts, model responses, tool arguments/results, identity,
+keys, tokens, or hidden reasoning. Ordinary CI/default pytest never selects the
+external marker and never reads a real model key.
+
+**Explicitly not included:** No metrics database, tracing vendor, budget billing,
+benchmark claims, automatic external call, provider fallback, public Agent API,
+LangGraph, Checkpoint, HITL, RAG, MCP, multi-agent, or Stage 9 code.
+
+**Automated tests:** Cover exact token aggregation, missing usage, monotonic fake
+latency, retry/tool counts, prompt version, success/failure outcomes, serialization
+and redaction, reusable fake behaviors, default external-test exclusion, no-key
+safe skip, and SDK-adapter smoke contract behind explicit marker. Regress all
+Tasks 8.1–8.7 with no network.
+
+**Real validation commands:** Run all Stage 8 focused tests; affected Stage 6/7
+Service regressions; full ordinary and warnings suites; Ruff, format, mypy, lock,
+and diff checks. Verify the default test selection excludes `external_provider`.
+Only when the owner explicitly authorizes credentials/cost may the separately
+marked smoke test run. If Tool integration is required, use only guarded
+`postgres-test` and stop it without deleting volumes.
+
+**Acceptance criteria:** Stage 8 demonstrates an offline fake-driven path from a
+validated goal through versioned structured planning and allowlisted
+Service-backed Tools to a bounded result, safe events, and metrics. The optional
+provider smoke boundary is isolated, no ordinary test needs a key/network, and no
+secret/sensitive payload is recorded.
+
+**Learning points:** Useful Agent metrics versus sensitive traces; deterministic
+test doubles; separating optional external verification from CI.
+
+**Stop boundary:** Task 8.8 completes Stage 8. Stop for owner confirmation. Do
+not begin LangGraph/Stage 9, persistence/approval/Stage 10, RAG, MCP, multi-agent,
+or any Stage 5 deferred authentication work.
 
 ### Stage 9 — Single-Agent LangGraph workflow
 

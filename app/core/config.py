@@ -12,6 +12,8 @@ POSTGRESQL_DRIVER = "postgresql+psycopg"
 MIN_ACCESS_TOKEN_SECRET_LENGTH = 32
 MIN_ACCESS_TOKEN_TTL_MINUTES = 1
 MAX_ACCESS_TOKEN_TTL_MINUTES = 60
+MAX_MODEL_PROVIDER_LENGTH = 100
+MAX_MODEL_NAME_LENGTH = 200
 
 
 class AppEnvironment(StrEnum):
@@ -42,6 +44,49 @@ class Settings(BaseSettings):
     access_token_ttl_minutes: int = 15
     access_token_issuer: str = "fastapi-stms"
     access_token_audience: str = "fastapi-stms-api"
+    model_provider: str | None = None
+    model_name: str | None = None
+    model_api_key: SecretStr | None = None
+
+    @field_validator("model_provider")
+    @classmethod
+    def validate_model_provider(cls, value: str | None) -> str | None:
+        """Bound a configured provider identifier without accepting blanks."""
+
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("model provider must not be blank")
+        if len(normalized) > MAX_MODEL_PROVIDER_LENGTH:
+            raise ValueError("model provider is too long")
+        return normalized
+
+    @field_validator("model_name")
+    @classmethod
+    def validate_model_name(cls, value: str | None) -> str | None:
+        """Bound a configured model identifier without accepting blanks."""
+
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("model name must not be blank")
+        if len(normalized) > MAX_MODEL_NAME_LENGTH:
+            raise ValueError("model name is too long")
+        return normalized
+
+    @field_validator("model_api_key")
+    @classmethod
+    def validate_model_api_key(
+        cls,
+        value: SecretStr | None,
+    ) -> SecretStr | None:
+        """Reject blank provider credentials without disclosing their content."""
+
+        if value is not None and not value.get_secret_value().strip():
+            raise ValueError("model API key must not be blank")
+        return value
 
     @field_validator("access_token_secret")
     @classmethod

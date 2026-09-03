@@ -7,6 +7,8 @@ PROJECT_NOT_FOUND_MESSAGE = "Project does not exist"
 TASK_NOT_FOUND_MESSAGE = "Task does not exist"
 TASK_TRANSITION_MESSAGE = "Task status transition is not allowed"
 ARCHIVED_PROJECT_MESSAGE = "Archived project cannot be modified"
+AGENT_PLANNING_CONFIGURATION_MESSAGE = "Study planning is not configured"
+AGENT_PLANNING_UNAVAILABLE_MESSAGE = "Study planning is temporarily unavailable"
 
 
 class DuplicateEmailError(Exception):
@@ -39,3 +41,11 @@ class ArchivedProjectError(Exception):
 
 class ProjectDateOrderError(ValueError):
     """Signal a safe Project date-order violation across persisted state."""
+
+
+class AgentPlanningConfigurationError(Exception):
+    """Signal unavailable provider configuration without exposing credentials."""
+
+
+class AgentPlanningUnavailableError(Exception):
+    """Signal a bounded provider failure without exposing model payloads."""

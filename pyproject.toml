@@ -23,10 +23,11 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-addopts = "-ra --strict-config --strict-markers -m 'not integration'"
+addopts = "-ra --strict-config --strict-markers -m 'not integration and not external_provider'"
 filterwarnings = ["error"]
 markers = [
     "integration: requires the dedicated PostgreSQL test service",
+    "external_provider: explicitly opted-in test that may use network and incur cost",
 ]
 pythonpath = ["."]
 testpaths = ["tests"]

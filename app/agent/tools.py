@@ -86,6 +86,12 @@ class UpdateTaskToolArguments(TaskUpdate):
 
 
 type AgentToolResult = ProjectListResponse | TaskListResponse | PublicTask
+type AgentToolArguments = (
+    ListProjectsToolArguments
+    | ListTasksToolArguments
+    | CreateTaskToolArguments
+    | UpdateTaskToolArguments
+)
 
 
 class AgentToolGateway(Protocol):
@@ -178,28 +184,7 @@ def execute_tool(
 ) -> AgentToolResult:
     """Validate one allowlisted request before opening any database Session."""
 
-    if name not in TOOL_NAMES:
-        raise AgentToolNotAllowedError(AGENT_TOOL_NOT_ALLOWED_MESSAGE)
-    if name in WRITE_TOOL_NAMES and not context.write_tools_enabled:
-        raise AgentToolNotAllowedError(AGENT_TOOL_NOT_ALLOWED_MESSAGE)
-
-    validated: (
-        ListProjectsToolArguments
-        | ListTasksToolArguments
-        | CreateTaskToolArguments
-        | UpdateTaskToolArguments
-    )
-    try:
-        if name == "list_projects":
-            validated = ListProjectsToolArguments.model_validate(arguments)
-        elif name == "list_tasks":
-            validated = ListTasksToolArguments.model_validate(arguments)
-        elif name == "create_task":
-            validated = CreateTaskToolArguments.model_validate(arguments)
-        else:
-            validated = UpdateTaskToolArguments.model_validate(arguments)
-    except ValidationError:
-        raise AgentToolInputError(AGENT_TOOL_INPUT_MESSAGE) from None
+    validated = validate_tool_arguments(name, arguments, context)
 
     runtime_gateway = gateway if gateway is not None else AgentDomainGateway()
     if isinstance(validated, ListProjectsToolArguments):
@@ -221,3 +206,30 @@ def execute_tool(
         task_id=validated.task_id,
         task_update=validated.to_task_update(),
     )
+
+
+def validate_tool_arguments(
+    name: str,
+    arguments: Mapping[str, object],
+    context: AgentRuntimeContext,
+) -> AgentToolArguments:
+    """Validate capability and arguments without constructing a gateway."""
+
+    if name not in TOOL_NAMES:
+        raise AgentToolNotAllowedError(AGENT_TOOL_NOT_ALLOWED_MESSAGE)
+    if name in WRITE_TOOL_NAMES and not context.write_tools_enabled:
+        raise AgentToolNotAllowedError(AGENT_TOOL_NOT_ALLOWED_MESSAGE)
+
+    validated: AgentToolArguments
+    try:
+        if name == "list_projects":
+            validated = ListProjectsToolArguments.model_validate(arguments)
+        elif name == "list_tasks":
+            validated = ListTasksToolArguments.model_validate(arguments)
+        elif name == "create_task":
+            validated = CreateTaskToolArguments.model_validate(arguments)
+        else:
+            validated = UpdateTaskToolArguments.model_validate(arguments)
+    except ValidationError:
+        raise AgentToolInputError(AGENT_TOOL_INPUT_MESSAGE) from None
+    return validated

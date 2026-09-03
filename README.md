@@ -726,4 +726,8 @@ FastAPI-STMS/
 
 Stage 3、4、6和7已经形成注册、认证、当前用户、Project与Task的完整同步分层基础。Stage 7真实PostgreSQL验收证明全部Task HTTP操作、两用户隔离、状态机、稳定查询、命名约束、迁移往返和精确清理一致。
 
-Stage 5的Refresh Token、轮换、退出登录和密码修改保留为非阻塞的延后认证增强轨道。下一阶段是Stage 8 Agent foundation and minimal tool loop，但必须先获得owner对Stage 7的确认。当前尚未实现Provider、LLM调用、Agent Tool、Streaming、LangGraph、RAG、Checkpoint、HITL、MCP或多Agent。
+Stage 8现已提供内部、离线可测的Agent基础：可替换OpenAI Provider适配器、版本化Prompt、严格结构化规划结果、四个Service-backed allowlist工具、有固定轮次和工具次数上限的循环、传输无关的安全进度事件，以及不含敏感载荷的Token/延迟指标。它没有公开Agent HTTP接口，普通测试不会访问外部模型。
+
+外部Provider smoke test默认被`external_provider`标记排除。只有owner明确授权网络、凭据和可能产生的费用后，才可在仅包含合成提示的环境中显式设置`STMS_RUN_EXTERNAL_PROVIDER_SMOKE=1`并单独选择该marker；不得在普通CI中启用，也不得输出API Key或完整模型响应。
+
+Stage 5的Refresh Token、轮换、退出登录和密码修改保留为非阻塞的延后认证增强轨道。下一阶段是Stage 9 Single-Agent LangGraph workflow，但必须先获得owner对Stage 8的确认。当前尚未实现公开Agent API、LangGraph、RAG、Checkpoint、HITL、SSE传输、MCP或多Agent。

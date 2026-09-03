@@ -47,6 +47,44 @@ class FakeResponses:
         return self.result
 
 
+class FakeRawStream:
+    def __init__(self, events: list[object], final_response: object) -> None:
+        self.events = events
+        self.final_response = final_response
+        self.closed = False
+
+    def __iter__(self) -> object:
+        return iter(self.events)
+
+    def get_final_response(self) -> object:
+        return self.final_response
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeStreamManager:
+    def __init__(self, stream: FakeRawStream) -> None:
+        self.stream = stream
+
+    def __enter__(self) -> FakeRawStream:
+        return self.stream
+
+    def __exit__(self, *args: object) -> None:
+        self.stream.close()
+
+
+class FakeStreamingResponses(FakeResponses):
+    def __init__(self, stream: FakeRawStream) -> None:
+        super().__init__(stream.final_response)
+        self.stream_value = stream
+        self.stream_parameters: dict[str, object] | None = None
+
+    def stream(self, **kwargs: object) -> FakeStreamManager:
+        self.stream_parameters = kwargs
+        return FakeStreamManager(self.stream_value)
+
+
 class FakeClient:
     def __init__(self, result: object | Exception) -> None:
         self.responses = FakeResponses(result)
@@ -55,6 +93,61 @@ class FakeClient:
     def with_options(self, *, timeout: float, max_retries: int) -> FakeClient:
         self.options = (timeout, max_retries)
         return self
+
+
+def test_stream_adapter_normalizes_chunks_final_response_and_closes() -> None:
+    final = SimpleNamespace(output_text='{"ok":true}', output=[], usage=None)
+    raw_stream = FakeRawStream(
+        [
+            SimpleNamespace(type="response.output_text.delta", delta='{"ok":'),
+            SimpleNamespace(type="response.output_text.delta", delta="true}"),
+            SimpleNamespace(type="response.other"),
+        ],
+        final,
+    )
+    responses = FakeStreamingResponses(raw_stream)
+    client = FakeClient(final)
+    client.responses = responses
+    provider = OpenAIProvider(
+        api_key=SecretStr("synthetic-provider-key"),
+        client_factory=RecordingFactory(client),
+    )
+
+    with provider.stream(_request(), timeout_seconds=10.0) as stream:
+        chunks = list(stream)
+
+    assert [chunk.output_text_delta for chunk in chunks[:-1]] == [
+        '{"ok":',
+        "true}",
+    ]
+    assert chunks[-1].response is not None
+    assert chunks[-1].response.output_text == '{"ok":true}'
+    assert raw_stream.closed is True
+    assert responses.stream_parameters is not None
+    assert responses.stream_parameters["store"] is False
+
+
+def test_stream_adapter_closes_when_consumer_raises() -> None:
+    final = SimpleNamespace(output_text='{"ok":true}', output=[], usage=None)
+    raw_stream = FakeRawStream(
+        [SimpleNamespace(type="response.output_text.delta", delta="x")],
+        final,
+    )
+    client = FakeClient(final)
+    client.responses = FakeStreamingResponses(raw_stream)
+    provider = OpenAIProvider(
+        api_key=SecretStr("synthetic-provider-key"),
+        client_factory=RecordingFactory(client),
+    )
+
+    with (
+        pytest.raises(RuntimeError, match="cancelled"),
+        provider.stream(_request(), timeout_seconds=10.0) as stream,
+    ):
+        next(stream)
+        raise RuntimeError("cancelled")
+
+    assert raw_stream.closed is True
 
 
 class RecordingFactory:

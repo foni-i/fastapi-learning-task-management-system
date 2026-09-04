@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, ExitStack, contextmanager
+from uuid import UUID
 
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -18,6 +19,7 @@ CHECKPOINT_UNAVAILABLE_MESSAGE = "Agent checkpoint storage is unavailable"
 
 type CheckpointSaver = PostgresSaver
 type SaverContextFactory = Callable[[str], AbstractContextManager[CheckpointSaver]]
+type LangGraphThreadConfig = dict[str, dict[str, str]]
 
 
 class AgentCheckpointConfigurationError(RuntimeError):
@@ -26,6 +28,14 @@ class AgentCheckpointConfigurationError(RuntimeError):
 
 class AgentCheckpointUnavailableError(RuntimeError):
     """Hide connection and setup diagnostics at the checkpoint boundary."""
+
+
+def build_thread_checkpoint_config(thread_id: UUID) -> LangGraphThreadConfig:
+    """Map one trusted product thread UUID to exact LangGraph configuration."""
+
+    if not isinstance(thread_id, UUID):
+        raise TypeError("Agent checkpoint thread ID must be a UUID")
+    return {"configurable": {"thread_id": str(thread_id)}}
 
 
 def _to_psycopg_conninfo(database_url: SecretStr) -> str:

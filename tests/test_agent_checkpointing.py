@@ -19,6 +19,7 @@ from app.agent.checkpointing import (
     AgentCheckpointConfigurationError,
     AgentCheckpointUnavailableError,
     CheckpointSaver,
+    build_thread_checkpoint_config,
     create_postgres_saver,
     open_postgres_checkpointer,
 )
@@ -169,3 +170,20 @@ def test_agent_state_contains_no_runtime_persistence_objects() -> None:
     forbidden = {"session", "connection", "checkpointer", "saver", "repository"}
 
     assert forbidden.isdisjoint(AgentGraphState.model_fields)
+
+
+def test_trusted_thread_uuid_maps_to_exact_stable_langgraph_configuration() -> None:
+    thread_id = __import__("uuid").uuid4()
+
+    first = build_thread_checkpoint_config(thread_id)
+    second = build_thread_checkpoint_config(thread_id)
+
+    assert first == second == {"configurable": {"thread_id": str(thread_id)}}
+    serialized = str(first).lower()
+    for forbidden in ("run_id", "user_id", "checkpoint_id", "session", "token"):
+        assert forbidden not in serialized
+
+
+def test_thread_configuration_rejects_non_uuid_model_values() -> None:
+    with pytest.raises(TypeError, match="thread ID must be a UUID"):
+        build_thread_checkpoint_config("model-selected")  # type: ignore[arg-type]

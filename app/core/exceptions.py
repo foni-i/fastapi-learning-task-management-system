@@ -9,6 +9,8 @@ TASK_TRANSITION_MESSAGE = "Task status transition is not allowed"
 ARCHIVED_PROJECT_MESSAGE = "Archived project cannot be modified"
 AGENT_PLANNING_CONFIGURATION_MESSAGE = "Study planning is not configured"
 AGENT_PLANNING_UNAVAILABLE_MESSAGE = "Study planning is temporarily unavailable"
+AGENT_THREAD_NOT_FOUND_MESSAGE = "Agent thread does not exist"
+AGENT_RUN_NOT_FOUND_MESSAGE = "Agent run does not exist"
 
 
 class DuplicateEmailError(Exception):
@@ -49,3 +51,11 @@ class AgentPlanningConfigurationError(Exception):
 
 class AgentPlanningUnavailableError(Exception):
     """Signal a bounded provider failure without exposing model payloads."""
+
+
+class AgentThreadNotFoundError(Exception):
+    """Hide whether an Agent thread is absent or belongs to another user."""
+
+
+class AgentRunNotFoundError(Exception):
+    """Hide whether an Agent run is absent or belongs to another user."""

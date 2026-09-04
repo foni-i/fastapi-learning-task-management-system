@@ -11,6 +11,7 @@ from app.models.agent_run import AgentApprovalStatus, AgentRunStatus, AgentThrea
 from app.schemas.agent_run import (
     AgentRunMetricsSnapshot,
     AgentThreadCreate,
+    AgentThreadRunResult,
     PublicAgentApproval,
     PublicAgentRun,
     PublicAgentThread,
@@ -116,6 +117,57 @@ def test_public_run_collects_flat_orm_metrics_and_has_exact_whitelist() -> None:
         "access_token",
     ):
         assert forbidden not in serialized.lower()
+
+
+def test_thread_run_result_is_strict_and_contains_only_public_records() -> None:
+    thread_id = uuid4()
+    thread = PublicAgentThread(
+        id=thread_id,
+        goal_summary="Goal",
+        status=AgentThreadStatus.ACTIVE,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    run = PublicAgentRun.model_validate(
+        SimpleNamespace(
+            id=uuid4(),
+            thread_id=thread_id,
+            user_id=uuid4(),
+            status="PENDING",
+            current_node=None,
+            summary=None,
+            error_code=None,
+            prompt_version="study-plan.v1",
+            model_round_count=0,
+            provider_attempt_count=0,
+            tool_call_count=0,
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            latency_ms=0,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+
+    result = AgentThreadRunResult(thread=thread, run=run)
+
+    assert set(result.model_dump()) == {"thread", "run"}
+    serialized = result.model_dump_json().lower()
+    for forbidden in (
+        "user_id",
+        "checkpoint",
+        "raw_prompt",
+        "model_response",
+        "access_token",
+        "authorization",
+        "session",
+    ):
+        assert forbidden not in serialized
+    with pytest.raises(ValidationError):
+        AgentThreadRunResult.model_validate(
+            {"thread": thread, "run": run, "user_id": str(uuid4())}
+        )
 
 
 @pytest.mark.parametrize("field", ["created_at", "updated_at"])

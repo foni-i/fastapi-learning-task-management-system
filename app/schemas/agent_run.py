@@ -168,6 +168,13 @@ class PublicAgentRun(_PublicRecord):
         return _utc(value)
 
 
+class AgentThreadRunResult(_StrictContract):
+    """Return a newly created thread and its first run as public records."""
+
+    thread: PublicAgentThread
+    run: PublicAgentRun
+
+
 class PublicAgentApproval(_PublicRecord):
     """Whitelist one exact proposal decision without model or tool payloads."""
 

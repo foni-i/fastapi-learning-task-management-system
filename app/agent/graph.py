@@ -2,8 +2,10 @@
 
 from collections.abc import Callable
 from typing import Protocol, cast
+from uuid import UUID
 
 from langchain_core.runnables.graph import Graph
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 
@@ -28,6 +30,7 @@ from app.agent.tools import AgentToolGateway
 
 AGENT_GRAPH_RECURSION_LIMIT = 16
 AGENT_GRAPH_FAILURE_SUMMARY = "Agent workflow failed safely."
+AGENT_CHECKPOINT_THREAD_MESSAGE = "Agent checkpoint thread ID is required"
 
 ANALYZE_GOAL = "analyze_goal"
 LOAD_CONTEXT = "load_context"
@@ -66,6 +69,10 @@ class _CompiledGraph(Protocol):
     ) -> dict[str, object]: ...
 
     def get_graph(self) -> Graph: ...
+
+
+class AgentCheckpointThreadError(RuntimeError):
+    """Reject missing or invalid host-owned checkpoint identity safely."""
 
 
 def _failed(code: str) -> StateUpdate:
@@ -113,22 +120,40 @@ def _merge_metrics(
 class AgentWorkflow:
     """Hide LangGraph state and invocation controls behind a strict facade."""
 
-    def __init__(self, compiled: _CompiledGraph) -> None:
+    def __init__(
+        self,
+        compiled: _CompiledGraph,
+        *,
+        checkpointing_enabled: bool = False,
+    ) -> None:
         self._compiled = compiled
+        self._checkpointing_enabled = checkpointing_enabled
 
     def get_graph(self) -> Graph:
         """Expose static topology for inspection without exposing runtime state."""
 
         return self._compiled.get_graph()
 
-    def invoke(self, graph_input: AgentGraphInput) -> AgentGraphOutput:
+    def invoke(
+        self,
+        graph_input: AgentGraphInput,
+        *,
+        thread_id: UUID | None = None,
+    ) -> AgentGraphOutput:
         """Run with a host-owned recursion ceiling and return only public output."""
 
         validated_input = AgentGraphInput.model_validate(graph_input)
+        if thread_id is not None and not isinstance(thread_id, UUID):
+            raise AgentCheckpointThreadError(AGENT_CHECKPOINT_THREAD_MESSAGE)
+        if self._checkpointing_enabled and thread_id is None:
+            raise AgentCheckpointThreadError(AGENT_CHECKPOINT_THREAD_MESSAGE)
+        config: dict[str, object] = {"recursion_limit": AGENT_GRAPH_RECURSION_LIMIT}
+        if thread_id is not None:
+            config["configurable"] = {"thread_id": str(thread_id)}
         try:
             result = self._compiled.invoke(
                 validated_input.model_dump(mode="python"),
-                config={"recursion_limit": AGENT_GRAPH_RECURSION_LIMIT},
+                config=config,
             )
             final_state = AgentGraphState.model_validate(result)
             return summarize(final_state)
@@ -153,6 +178,7 @@ def build_agent_graph(
     approval_decider: ApprovalDecider,
     clock: Clock,
     sleeper: Sleeper,
+    checkpointer: BaseCheckpointSaver[str] | None = None,
 ) -> AgentWorkflow:
     """Compile the eight accepted nodes with host-owned runtime dependencies."""
 
@@ -292,5 +318,8 @@ def build_agent_graph(
     builder.add_edge(EXECUTE_TASKS, VERIFY_RESULT)
     builder.add_edge(VERIFY_RESULT, SUMMARIZE)
     builder.add_edge(SUMMARIZE, END)
-    compiled = cast(_CompiledGraph, builder.compile())
-    return AgentWorkflow(compiled)
+    compiled = cast(_CompiledGraph, builder.compile(checkpointer=checkpointer))
+    return AgentWorkflow(
+        compiled,
+        checkpointing_enabled=checkpointer is not None,
+    )

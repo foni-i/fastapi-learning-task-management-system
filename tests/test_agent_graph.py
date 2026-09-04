@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError
 from pydantic import ValidationError
 
@@ -14,6 +16,7 @@ from app.agent.graph import (
     AGENT_GRAPH_FAILURE_SUMMARY,
     AGENT_GRAPH_NODE_NAMES,
     AGENT_GRAPH_RECURSION_LIMIT,
+    AgentCheckpointThreadError,
     AgentWorkflow,
     build_agent_graph,
 )
@@ -201,6 +204,7 @@ def _workflow(
     approver: SequenceApprover,
     gateway: FakeGateway,
     user_id: UUID | None = None,
+    checkpointer: BaseCheckpointSaver[str] | None = None,
 ) -> tuple[AgentWorkflow, UUID]:
     trusted_user_id = user_id or uuid4()
     workflow = build_agent_graph(
@@ -214,6 +218,7 @@ def _workflow(
         approval_decider=approver,
         clock=lambda: 1.0,
         sleeper=lambda _: None,
+        checkpointer=checkpointer,
     )
     return workflow, trusted_user_id
 
@@ -515,3 +520,47 @@ def test_recursion_ceiling_is_fixed_and_failure_is_redacted() -> None:
     assert output.status is AgentTerminalStatus.FAILED
     assert output.summary == AGENT_GRAPH_FAILURE_SUMMARY
     assert "private" not in output.model_dump_json()
+
+
+def test_checkpointed_graph_requires_a_host_owned_thread_id() -> None:
+    workflow, _ = _workflow(
+        provider=CapturingProvider([_proposal_response()]),
+        approver=SequenceApprover([_approve()]),
+        gateway=FakeGateway(),
+        checkpointer=InMemorySaver(),
+    )
+
+    with pytest.raises(AgentCheckpointThreadError, match="thread ID is required"):
+        workflow.invoke(AgentGraphInput(goal=PlanningGoal(objective="Learn")))
+
+
+def test_checkpointed_graph_uses_exact_stable_thread_configuration() -> None:
+    saver = InMemorySaver()
+    workflow, _ = _workflow(
+        provider=CapturingProvider([_proposal_response()]),
+        approver=SequenceApprover([_approve()]),
+        gateway=FakeGateway(),
+        checkpointer=saver,
+    )
+    thread_id = uuid4()
+
+    output = workflow.invoke(
+        AgentGraphInput(goal=PlanningGoal(objective="Learn")),
+        thread_id=thread_id,
+    )
+
+    assert output.status is AgentTerminalStatus.SUCCEEDED
+    stored = saver.get_tuple({"configurable": {"thread_id": str(thread_id)}})
+    assert stored is not None
+
+
+def test_offline_graph_stays_compatible_without_thread_configuration() -> None:
+    workflow, _ = _workflow(
+        provider=CapturingProvider([_proposal_response()]),
+        approver=SequenceApprover([_approve()]),
+        gateway=FakeGateway(),
+    )
+
+    output = workflow.invoke(AgentGraphInput(goal=PlanningGoal(objective="Learn")))
+
+    assert output.status is AgentTerminalStatus.SUCCEEDED

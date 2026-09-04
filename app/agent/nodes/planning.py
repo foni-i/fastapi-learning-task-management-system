@@ -81,6 +81,7 @@ def generate_plan(
             state.goal,
             analysis,
             context,
+            approval_feedback=state.approval_feedback,
         )
         request = ProviderRequest(
             model=model,

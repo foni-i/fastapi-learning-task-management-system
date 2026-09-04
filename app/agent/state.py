@@ -238,6 +238,15 @@ class AgentVerification(_FrozenContract):
         pattern=r"^[A-Z][A-Z0-9_]{0,63}$",
     )
 
+    @model_validator(mode="after")
+    def require_consistent_error(self) -> Self:
+        if self.status is AgentVerificationStatus.FAILED:
+            if self.error_code is None:
+                raise ValueError("Failed verification requires an error code")
+        elif self.error_code is not None:
+            raise ValueError("Successful verification cannot contain an error code")
+        return self
+
 
 class AgentGraphInput(_FrozenContract):
     """Accept only an already validated planning goal."""
@@ -271,6 +280,10 @@ class AgentGraphState(_FrozenContract):
     )
     verification: AgentVerification | None = None
     terminal_status: AgentTerminalStatus | None = None
+    workflow_error_code: str | None = Field(
+        default=None,
+        pattern=r"^[A-Z][A-Z0-9_]{0,63}$",
+    )
     summary: str | None = Field(default=None, max_length=MAX_SAFE_SUMMARY_LENGTH)
     metrics: AgentRunMetrics | None = None
 

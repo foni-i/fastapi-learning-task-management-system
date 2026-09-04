@@ -45,14 +45,18 @@ def build_agent_plan_proposal_prompt(
     goal: PlanningGoal,
     analysis: AgentGoalAnalysis,
     context: AgentContextSnapshot,
+    *,
+    approval_feedback: str | None = None,
 ) -> VersionedPrompt:
     """Build bounded provider input from public serializable workflow values."""
 
-    payload = {
+    payload: dict[str, object] = {
         "goal": goal.model_dump(mode="json"),
         "analysis": analysis.model_dump(mode="json"),
         "context": context.model_dump(mode="json"),
     }
+    if approval_feedback is not None:
+        payload["revision_feedback"] = approval_feedback
     serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return VersionedPrompt(
         version=STUDY_PLAN_PROMPT_VERSION,

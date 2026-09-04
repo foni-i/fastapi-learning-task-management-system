@@ -3836,19 +3836,583 @@ Stage 10, add RAG, MCP, multi-agent behavior, or resume deferred Stage 5 work.
 ### Stage 10 — Persistence, HITL, and streaming
 
 Separate LangGraph recovery state from product audit records and make execution
-safe across retries and restarts.
+safe across retries, process restarts, and authenticated HTTP requests. Stage 10
+adds durable execution around the accepted synchronous Stage 9 graph; it does
+not create a second authorization or domain-persistence stack.
 
-- **Task 10.1:** Thread/run/approval business records and reversible migration.
-- **Task 10.2:** Official PostgreSQL LangGraph checkpointer integration.
-- **Task 10.3:** Stable `thread_id`/`run_id` creation and ownership lookup.
-- **Task 10.4:** Approve, reject, and edit interrupt/resume workflow.
-- **Task 10.5:** Tool idempotency and duplicate-write prevention.
-- **Task 10.6:** Mandatory approval for batch creation, deletion, and high impact.
-- **Task 10.7:** SSE node/tool/progress streaming without hidden reasoning.
-- **Task 10.8:** Restart recovery, audit-summary, and PostgreSQL tests.
+The durable execution path is:
 
-Checkpoint tables are managed by the official persistence implementation and
-are not queried as the product's audit API.
+```text
+Authenticated user
+    -> stable thread_id and run_id
+    -> owner-scoped business thread/run record
+    -> LangGraph with official PostgreSQL checkpointer
+    -> durable approval interrupt
+    -> authenticated approve/reject/edit resume
+    -> idempotent allowlisted Agent tool
+    -> existing Domain service and Repository
+    -> PostgreSQL
+    -> safe run snapshot and SSE progress
+```
+
+Stage 10 keeps three data concerns separate:
+
+1. Existing domain tables (`users`, `projects`, and `tasks`) remain the source of
+   truth for user-owned learning data and are changed only through Domain
+   Services.
+2. Product-owned Agent business records store owner-scoped thread/run identity,
+   approval decisions, safe execution summaries, outcomes, stable error codes,
+   and bounded metrics required by the product and its audit API.
+3. Official LangGraph checkpoint tables store graph recovery state and are
+   created, migrated, and accessed only through the official persistence
+   implementation. They are not queried through product repositories and are
+   never presented as the product audit API.
+
+Business records and public events never store or expose hidden reasoning,
+complete prompts/model responses, raw sensitive tool payloads, API keys, access
+tokens, `Authorization` headers, Sessions, connections, ORM objects, complete
+database URLs, or raw database/provider diagnostics. Agent state continues to
+contain only validated JSON-serializable values. The existing application and
+Domain Services continue to use synchronous SQLAlchemy `Session`; adopting a
+LangGraph checkpointer is not permission to introduce `AsyncSession`.
+
+The Stage 10 result milestones are:
+
+1. Task 10.1 independently fixes and migrates the product-owned audit data
+   contract before a separate persistence library is introduced.
+2. Tasks 10.2–10.3 integrate the official checkpointer and bind stable,
+   owner-scoped thread/run identities to graph configuration.
+3. Task 10.4 introduces durable authenticated interrupt/resume without yet
+   expanding the write-tool surface.
+4. Tasks 10.5–10.6 make replayed and high-impact writes idempotent and explicitly
+   approved.
+5. Tasks 10.7–10.8 add safe SSE delivery and prove restart recovery, ownership,
+   migrations, and audit behavior against real PostgreSQL.
+
+### Task 10.1 — Thread/run/approval business records and reversible migration
+
+**Estimated time:** 1–2 focused hours. **Migration/real PostgreSQL:** one new
+application Alembic revision and guarded `postgres-test` verification are
+required. **New dependency:** none.
+
+**Goal:** Establish the minimal product-owned records needed to identify and
+audit Agent threads, individual runs, and human approval decisions without
+using LangGraph checkpoint rows as business data.
+
+**Prerequisites:** Stage 9 is accepted and committed; the unique Alembic head is
+`6e2f9a4c1b73`; the existing UUID, UTC timestamp, owner-scoped foreign-key,
+named-constraint, synchronous Session, migration-safety, and public-schema
+conventions remain authoritative.
+
+**Files:** New `app/models/agent_run.py`, `app/schemas/agent_run.py`, and one new
+revision under `alembic/versions/`; update `app/models/__init__.py` so Alembic
+metadata discovers the new models; add focused `tests/test_agent_run_models.py`
+and `tests/test_agent_run_schemas.py`, plus one narrow real-PostgreSQL migration
+test under `tests/integration/`. Use a different equally clear filename only if
+the implementation task first finds an established repository naming conflict.
+
+**Implementation scope:** Add product tables `agent_threads`, `agent_runs`, and
+`agent_approvals`. Every table uses PostgreSQL UUID primary keys generated by the
+database, timezone-aware UTC `created_at`/`updated_at`, explicit named primary,
+foreign-key, check, unique, and index contracts, and bounded strings. A thread is
+owned by one `users.id` and stores only a bounded safe goal summary and lifecycle
+status. A run belongs to one thread and the same owner, stores its graph status,
+current safe node name, bounded terminal summary/error code, prompt version,
+and bounded aggregate metrics; it does not store graph state or raw model/tool
+payloads. An approval belongs to one run and stores revision, proposal
+fingerprint, pending/approved/rejected/changes-requested decision, bounded safe
+feedback, decision timestamp, and the deciding authenticated user. A named
+unique constraint on `(run_id, revision)` prevents two business approval rows
+for the same proposal revision. Define strict internal/public Pydantic contracts
+that whitelist identifiers, safe statuses, timestamps, summaries, and metrics.
+The new migration has `down_revision = "6e2f9a4c1b73"`, creates only these
+product tables in dependency order, and drops only them in reverse order.
+
+**Explicitly not included:** No official Checkpointer dependency or tables,
+repository/service, graph compile change, HTTP Router, interrupt/resume, Tool
+execution record, idempotency key, high-impact Tool, SSE, background worker,
+RAG, or Stage 11 behavior. Do not modify a historical migration.
+
+**Automated tests:** Prove exact columns/types/nullability/defaults, named
+constraints/indexes, owner and parent foreign keys, allowed statuses, bounded
+safe fields, aware timestamp/public whitelist behavior, extra-field rejection,
+and absence of prompt/response/action arguments/credentials. The PostgreSQL
+migration test must upgrade from `6e2f9a4c1b73` to the new revision, inspect all
+three tables and names, downgrade to `6e2f9a4c1b73` and confirm only these tables
+are removed while Stage 7 domain tables remain, then re-upgrade and restore the
+current head.
+
+**Focused validation commands:** Run the model/schema tests, the focused marked
+migration test on guarded `postgres-test`, `alembic current`, `alembic heads`,
+`alembic check`, affected metadata/migration regressions, Ruff, format, mypy,
+lock, and diff checks. Start and stop only `postgres-test`; never touch
+`postgres-dev` or volumes.
+
+**Acceptance criteria:** Product-owned thread/run/approval contracts are
+discoverable in SQLAlchemy metadata and reproducible by one reversible linear
+migration; ownership and approval-revision integrity have database defenses;
+no Checkpoint or sensitive execution content is represented as business audit
+data.
+
+**Learning points:** Product audit data versus recovery state; composite
+ownership/integrity constraints; reversible schema evolution at a stage boundary.
+
+**Stop boundary:** Stop after models, strict schemas, migration, and their tests.
+Do not install a Checkpointer, add repositories/services/routes, compile the
+graph with persistence, or start Task 10.2.
+
+### Task 10.2 — Official PostgreSQL LangGraph checkpointer integration
+
+**Estimated time:** 1–2 focused hours. **Migration:** no application Alembic
+revision. **Real PostgreSQL:** required only in a marked focused integration
+test. **New dependency:** the minimal official PostgreSQL Checkpointer package,
+added only in this task after compatibility verification.
+
+**Goal:** Provide one replaceable synchronous checkpoint factory/lifecycle that
+can compile the Stage 9 graph for durable recovery without leaking persistence
+objects into graph state or product repositories.
+
+**Prerequisites:** Task 10.1 is accepted and committed. Before editing, verify
+the official package name, supported synchronous API, current LangGraph range,
+Python 3.14 compatibility, PostgreSQL driver expectations, setup/migration
+method, and `uv` resolution from primary documentation. Stop on an unresolved
+compatibility or lifecycle conflict rather than guessing.
+
+**Files:** A narrowly named module such as `app/agent/checkpointing.py`, minimal
+configuration additions in `app/core/config.py` and `.env.example` only when an
+independent checkpoint database setting is required, `pyproject.toml`,
+`uv.lock`, focused `tests/test_agent_checkpointing.py`, and a marked
+`tests/integration/test_agent_checkpointing.py`. Change `app/agent/graph.py`
+only enough to accept a host-owned checkpointer at compile time while preserving
+the existing no-checkpointer offline path and tests.
+
+**Implementation scope:** Wrap the official synchronous PostgreSQL Checkpointer
+behind a small application-owned factory/context boundary. Configuration must
+come from a secret-aware environment setting with no unsafe production default.
+Create/setup official checkpoint tables solely through the official library,
+not SQLAlchemy models or Alembic. Pass the checkpointer to LangGraph compilation
+and stable `thread_id` through LangGraph configuration, never through
+model-visible state. Close every checkpointer connection/pool deterministically.
+Keep offline graph construction possible with no database. Clearly document in
+code that product repositories must not query official checkpoint tables.
+
+**Explicitly not included:** No `AsyncSession`, async application rewrite,
+business audit CRUD, new application migration, public API, authenticated
+thread/run service, interrupt/resume, idempotency, SSE, provider network call,
+or hand-written checkpoint schema.
+
+**Automated tests:** With a fake factory, prove lazy construction, exact stable
+configuration, graph state exclusion, offline compatibility, safe missing/
+invalid configuration errors, and closure on success/failure. A marked real
+PostgreSQL test must use the guarded test target, run official setup, write and
+read one synthetic checkpoint through the public Checkpointer API, create no
+application audit record implicitly, and avoid inspecting or asserting private
+table layouts beyond official readiness behavior.
+
+**Focused validation commands:** Run checkpointing and graph unit tests; then on
+`postgres-test` run only the marked checkpoint integration test using synthetic
+state and no real provider. Run Ruff, format, mypy, lock, and diff checks. Confirm
+no application Alembic revision or unrelated dependency upgrade appeared.
+
+**Acceptance criteria:** A synchronous Stage 9 graph can be compiled with an
+official PostgreSQL Checkpointer and recover synthetic serializable state by
+stable thread configuration; the existing offline graph remains deterministic;
+connections close and no Checkpoint row becomes product audit output.
+
+**Learning points:** Library-owned versus application-owned schema lifecycle;
+dependency injection for persistence; synchronous Checkpointer lifecycle versus
+SQLAlchemy Session lifecycle.
+
+**Stop boundary:** Stop after the Checkpointer adapter, compile seam, and focused
+tests. Do not build owner-scoped runs, approval endpoints, interrupts, replay, or
+SSE.
+
+### Task 10.3 — Stable `thread_id`/`run_id` creation and ownership lookup
+
+**Estimated time:** 1–2 focused hours. **Migration/new dependency:** none.
+**Real PostgreSQL:** optional focused integration only if unit fakes cannot prove
+a discovered constraint behavior.
+
+**Goal:** Create and retrieve product Agent threads/runs with stable UUIDs and
+bind their owner-checked identity to LangGraph configuration without letting the
+model or another user select ownership.
+
+**Prerequisites:** Tasks 10.1–10.2 are accepted; the business models and
+Checkpointer lifecycle are fixed; current-user authentication and safe 404
+conventions are unchanged.
+
+**Files:** New `app/repositories/agent_runs.py` and
+`app/services/agent_runs.py`, focused `tests/test_agent_run_repository.py` and
+`tests/test_agent_run_service.py`, and minimal additions to
+`app/schemas/agent_run.py`. Use the existing synchronous `Session` and current
+clock/factory injection styles.
+
+**Implementation scope:** Repository operations create and owner-scope threads,
+runs, and approvals, call `add`/`flush` or queries, and never commit or translate
+HTTP. Service functions create a new thread plus initial run in one transaction,
+create a later run for an owned thread, and retrieve an owned thread/run using
+both resource and authenticated `user_id`; foreign-owned and absent identifiers
+share a safe domain 404. The service, not the client/model, supplies `user_id`,
+generates or accepts host-generated stable UUIDs, commits success, rolls back
+failure, and returns strict public schemas. Provide one pure mapping from the
+owned thread ID to LangGraph `configurable.thread_id`; keep `run_id` as product
+execution identity and never confuse it with a Checkpoint ID. Repeated creation
+requests are not yet idempotent unless a caller supplies a separately validated
+operation key introduced in Task 10.5.
+
+**Explicitly not included:** No Router, graph execution, approval decision,
+interrupt/resume, Tool write, idempotency table, SSE, checkpoint-table query,
+provider call, or migration.
+
+**Automated tests:** Cover new thread/initial run, later run for an owned thread,
+exact owner predicates, cross-user safe 404, generated/stable UUID round trips,
+thread/run distinction, correct LangGraph configuration, commit/refresh on
+success, rollback on every write failure, no commit for reads, repository
+`flush` without commit, strict public fields, and no caller/model `user_id`,
+Session, token, or checkpoint internals in schemas or errors.
+
+**Focused validation commands:** Run run repository/service/schema tests,
+current-user ownership regressions, Stage 9 state/graph tests, then Ruff, format,
+mypy, lock, and diff checks. No Docker is required unless a concrete database
+constraint defect needs focused proof.
+
+**Acceptance criteria:** Trusted application code can create and owner-safely
+look up stable thread/run identities and derive the exact Checkpointer thread
+configuration; Service/Repository transaction ownership matches the rest of the
+application; no graph has been started or resumed.
+
+**Learning points:** Product run identity versus graph checkpoint identity;
+owner-scoped repository predicates; transactionally creating an aggregate root
+and its first run.
+
+**Stop boundary:** Tasks 10.2–10.3 form the second Stage 10 result milestone.
+Stop before public run routes, graph invocation, interrupt/resume, idempotent
+writes, or SSE.
+
+### Task 10.4 — Approve, reject, and edit interrupt/resume workflow
+
+**Estimated time:** 1–2 focused hours. **Migration/new dependency:** none.
+**Real PostgreSQL:** a marked focused integration test is required because
+durable pause/resume cannot be proven by only an in-memory fake.
+
+**Goal:** Replace the Stage 9 in-process approval decision for durable execution
+with a LangGraph interrupt that can be resumed exactly once by the authenticated
+owner through strict approve, reject, or request-changes input.
+
+**Prerequisites:** Tasks 10.1–10.3 are accepted; official Checkpoint recovery,
+owned run lookup, and the Stage 9 fingerprint/revision limits are stable.
+
+**Files:** Minimal durable extensions to `app/agent/graph.py` and
+`app/agent/nodes/approval.py`; new orchestration service such as
+`app/services/agent_workflow.py`; strict request/response additions in
+`app/schemas/agent_run.py`; new `app/api/v1/endpoints/agent_runs.py` and minimal
+router inclusion; focused `tests/test_agent_workflow_service.py` and
+`tests/test_agent_run_api.py`; marked focused integration coverage under
+`tests/integration/`.
+
+**Implementation scope:** Add authenticated endpoints to start one bounded Agent
+run, retrieve its safe owner-scoped snapshot, and submit one approval decision
+for a pending run. The start path creates product identities, invokes the graph
+with the owned `thread_id`, and records a pending approval when LangGraph
+interrupts. The resume path validates owner, run/thread relation, pending status,
+current revision, and proposal fingerprint before calling `Command(resume=...)`
+or the exact official synchronous equivalent. Approve may continue to execution;
+reject terminates with zero new writes; request-changes carries bounded untrusted
+feedback back through generation, deterministic validation, and a fresh
+interrupt. At most two edits remain allowed. Persist the business decision and
+run status transactionally around the orchestrator's documented failure points;
+return safe conflict/not-found errors for already-decided, terminal, stale, or
+foreign-owned attempts.
+
+**Explicitly not included:** No SSE, polling worker, background queue,
+idempotent Tool replay, batch/delete Tool, Stage 9 in-process adapter as durable
+storage, Checkpoint internals in responses, or Stage 11 behavior.
+
+**Automated tests:** Cover start-to-interrupt, exact safe approval payload,
+approve/reject/edit, revalidation and fresh approval after edit, second-edit
+limit, stale fingerprint/revision, duplicate resume, terminal run, missing and
+foreign-owned safe 404, owner identity only from authentication, Service
+commit/rollback, process-local object loss followed by Checkpointer resume in a
+focused PostgreSQL test, and redaction of prompt/action arguments/tokens/hidden
+reasoning/checkpoint data.
+
+**Focused validation commands:** Run workflow service, Agent run API, approval,
+graph, authentication, route-whitelist, and OpenAPI tests; run the marked durable
+interrupt/resume test on guarded `postgres-test`; then Ruff, format, mypy, lock,
+and diff. Do not call a real provider—use the deterministic scripted provider.
+
+**Acceptance criteria:** An authenticated owner can start a run, observe a safe
+pending approval, and durably approve, reject, or request bounded changes after
+process-local dependencies are rebuilt; duplicate/stale/cross-user resumes fail
+safely and no model output can approve itself.
+
+**Learning points:** LangGraph interrupt versus in-process callback; optimistic
+approval identity with proposal fingerprints; coordinating product transactions
+with an external persistence boundary.
+
+**Stop boundary:** Task 10.4 is its own review milestone. Do not add idempotency,
+new high-impact Tools, SSE, RAG, or final Stage 10 recovery coverage.
+
+### Task 10.5 — Tool idempotency and duplicate-write prevention
+
+**Estimated time:** 1–2 focused hours. **Migration/real PostgreSQL:** one new
+reversible application migration and a focused concurrency/replay integration
+test are required. **New dependency:** none.
+
+**Goal:** Ensure a resumed, retried, or duplicated approved action cannot repeat
+a domain write, while accurately distinguishing completed, failed, in-progress,
+and unknown outcomes.
+
+**Prerequisites:** Task 10.4 is accepted; action keys, proposal fingerprints,
+run identity, and Tool execution order are stable.
+
+**Files:** New `app/models/agent_tool_execution.py` or an equally narrow model,
+one Alembic revision whose `down_revision` is Task 10.1's application revision,
+model export update, `app/repositories/agent_tool_executions.py`,
+`app/services/agent_tool_executions.py`, minimal execution-node/workflow wiring,
+strict safe schema additions, focused unit tests, and one marked integration
+test. Do not alter official Checkpoint tables.
+
+**Implementation scope:** Persist one product execution-intent row before each
+approved write using a deterministic idempotency identity derived from owned
+`run_id`, validated proposal fingerprint, revision, and action key—not raw model
+arguments. A named database unique constraint is the concurrency and replay
+final defense. The service claims an action, executes the existing allowlisted
+Tool once, and records only safe status, tool name, public result identity/
+summary, error code, attempt timing, and timestamps. A repeated completed action
+returns the prior safe result without calling the Tool; an in-progress or
+unknown-outcome action fails closed for explicit reconciliation; an accepted
+retry policy may retry only outcomes proven to have produced no domain write.
+Repository operations only query/add/update/flush; the coordinating Service owns
+commit/rollback. Handle the named unique-constraint race, not every
+`IntegrityError`, as an idempotent duplicate claim.
+
+**Explicitly not included:** No compensation, distributed lock, arbitrary
+caller idempotency key, hidden payload persistence, automatic retry of unknown
+outcomes, batch/delete Tool, SSE, or Checkpoint-table query.
+
+**Automated tests:** Cover first execution, completed replay with zero Tool
+calls, two-session deterministic claim race, named unique constraint, failed and
+unknown outcomes, safe retry eligibility, crash points before/after domain
+commit, owner/run/action binding, repository transaction discipline, public
+result reconstruction, and no sensitive arguments/identity/diagnostics in
+records or errors. Migration tests cover upgrade, downgrade to Task 10.1 head,
+re-upgrade, and metadata drift while retaining all Task 10.1 tables.
+
+**Focused validation commands:** Run idempotency service/node/model tests and
+the guarded PostgreSQL migration/concurrency/replay tests; run Stage 9 execution
+and Task Service regressions; then `alembic current`, `heads`, `check`, Ruff,
+format, mypy, lock, and diff. Stop only `postgres-test` afterward.
+
+**Acceptance criteria:** Replaying the same accepted action cannot create a
+second domain write; concurrent claims have one database winner; ambiguous
+outcomes are visible and fail closed; the audit record contains only safe
+bounded data.
+
+**Learning points:** At-most-once intent versus exactly-once claims; database
+uniqueness as the replay final defense; crash windows across separate use-case
+transactions.
+
+**Stop boundary:** Stop after idempotency storage and integration with the
+existing two Task write tools. Do not add high-impact Tools, bulk behavior, SSE,
+or final recovery tests.
+
+### Task 10.6 — Mandatory approval for batch creation, deletion, and high impact
+
+**Estimated time:** 1–2 focused hours. **Migration/new dependency:** none.
+**Real PostgreSQL:** optional only when a focused transaction/ownership defect is
+found; ordinary acceptance uses service/tool fakes.
+
+**Goal:** Define an explicit deterministic high-impact capability policy and
+ensure batch task creation and task deletion cannot execute without a matching
+persisted approval and idempotent action claim.
+
+**Prerequisites:** Task 10.5 is accepted; durable approval and idempotent Tool
+execution are available; existing Task create/delete owner rules are stable.
+
+**Files:** Extend `app/agent/tools.py`, the Stage 9 proposal/validation contracts,
+execution policy modules or add one narrow `app/agent/policy.py`, and
+`app/services/agent_domain.py`; add focused
+`tests/test_agent_high_impact_policy.py` and update relevant Tool, planning,
+approval, execution, and graph tests. Add a dedicated Domain Service operation
+for bounded batch creation only if no existing service can own one atomic batch
+transaction without weakening current layering.
+
+**Implementation scope:** Add only the explicitly named `batch_create_tasks` and
+`delete_task` capabilities. Batch input contains one to at most ten strict
+`TaskCreate` items and uses an owned Project; deletion accepts only `task_id`.
+Classify these two tools as high impact in a code-owned frozen allowlist. The
+model may propose them but cannot set `approved`, `user_id`, idempotency status,
+or transaction options. Deterministic validation marks their approval scope;
+execution requires a matching persisted approved proposal fingerprint/revision
+and a successfully claimed idempotency record before invoking the Domain
+Service. Batch creation owns one explicit Service transaction so it is all-or-
+nothing; delete reuses the existing owner-scoped safe 404 behavior. Rejection,
+stale approval, write-disabled runtime, or missing idempotency claim causes zero
+domain calls.
+
+**Explicitly not included:** No project deletion, arbitrary bulk Tool, more than
+ten writes, model-selected policy, self-approval, compensation workflow,
+background execution, SSE, or Stage 11 behavior.
+
+**Automated tests:** Cover the exact expanded allowlist/schema, batch bounds and
+atomic Service behavior, delete ownership, cross-user safe 404, policy
+classification, mandatory matching approval, stale/wrong-run approval, no Tool
+call before approval/idempotency, duplicate execution returning the accepted
+prior result, write-disabled context, rollback on one invalid batch item, public
+output bounds, and redaction of item payloads, identity, tokens, and diagnostics.
+
+**Focused validation commands:** Run high-impact policy, Agent read/write Tool,
+planning/approval/execution/graph, Task Service/delete, and idempotency tests,
+then the full ordinary suite, Ruff, format, mypy, lock, and diff. Do not start
+Docker unless a concrete PostgreSQL-only defect requires proof.
+
+**Acceptance criteria:** High-impact capability is a deterministic application
+policy, not model data; batch creation and deletion require current durable
+approval and idempotency; ownership and transaction rules continue through
+Domain Services.
+
+**Learning points:** Risk-based capability gating; approval binding versus a
+boolean flag; atomic bounded batch writes through one Service transaction.
+
+**Stop boundary:** Tasks 10.5–10.6 form the write-safety milestone. Do not add
+SSE, additional Tool families, background workers, RAG, or Stage 11 behavior.
+
+### Task 10.7 — SSE node/tool/progress streaming without hidden reasoning
+
+**Estimated time:** 1–2 focused hours. **Migration/new dependency:** none unless
+the implementation proves the current framework cannot emit standards-compliant
+SSE; do not add a package speculatively. **Real PostgreSQL:** use fakes for
+ordinary tests and the accepted run store for focused API behavior.
+
+**Goal:** Expose an authenticated, owner-scoped Server-Sent Events stream of
+safe persisted Agent progress without turning internal graph state or reasoning
+into a public event log.
+
+**Prerequisites:** Tasks 10.1–10.6 are accepted; public run statuses, safe audit
+summaries, durable approval, and execution outcomes are stable.
+
+**Files:** New strict `app/schemas/agent_events.py` and a narrow streaming
+service such as `app/services/agent_events.py`; extend the Agent run endpoint
+and router; update `app/agent/events.py` only to map accepted internal events to
+the public contract; add focused `tests/test_agent_sse.py` plus affected OpenAPI,
+route, auth, and redaction regressions.
+
+**Implementation scope:** Add an authenticated owner-scoped SSE endpoint for one
+run. Define versioned event types for run/node status, Tool start/result summary,
+approval required, safe metrics, heartbeat, terminal result, and safe error.
+Every event has a stable monotonically ordered event ID within the run, run ID,
+event type, aware UTC timestamp, and strict bounded public payload. Specify and
+test deterministic ordering, one terminal event, heartbeat with no business
+payload, disconnect cancellation/cleanup, and `Last-Event-ID` resume from the
+product event/audit boundary without reading Checkpoint internals. Completed
+runs can replay only bounded retained public events or return the final safe run
+snapshot according to one documented contract. Streaming must not hold a
+SQLAlchemy Session open while awaiting the client; services perform short reads.
+
+**Explicitly not included:** No WebSocket, hidden chain-of-thought, token-by-token
+model text, complete prompts/responses, raw Tool arguments/results, polling
+worker, message queue, Redis, unrestricted event retention, RAG, or public
+Checkpoint inspection.
+
+**Automated tests:** Cover media type and framing, exact event schemas/order/IDs,
+node and Tool summaries, approval and terminal events, heartbeat, reconnect from
+valid/stale/foreign run event IDs, completed stream, disconnect cleanup, owner
+safe 404, authentication 401, no long-lived Session, bounded output, and
+redaction of credentials, identity internals, prompts, arguments, diagnostics,
+database URLs, and hidden reasoning. Keep tests deterministic without sleeps.
+
+**Focused validation commands:** Run SSE service/API, events, run API,
+authentication, graph, idempotency, OpenAPI, and strict route tests, followed by
+the full ordinary/warnings suite, Ruff, format, mypy, lock, and diff. No real
+provider is allowed.
+
+**Acceptance criteria:** A client can observe and reconnect to one owned run's
+ordered safe progress through standards-compliant SSE; disconnects close
+resources; internal state and sensitive data never cross the public event
+whitelist.
+
+**Learning points:** SSE framing and reconnection; durable public events versus
+ephemeral graph callbacks; resource lifetime for streaming responses.
+
+**Stop boundary:** Stop after safe SSE transport and focused tests. Do not run
+the complete restart/migration matrix, add WebSockets, RAG, tracing vendors, or
+Stage 11 code.
+
+### Task 10.8 — Restart recovery, audit-summary, and PostgreSQL tests
+
+**Estimated time:** 1–2 focused hours. **Migration:** no new revision; validate
+all Stage 10 revisions. **Real PostgreSQL/Docker:** required. **New dependency:**
+none.
+
+**Goal:** Prove the complete Stage 10 durable workflow against the dedicated
+PostgreSQL service, document its safe public behavior, and close the stage with
+repeatable recovery, ownership, idempotency, migration, and security evidence.
+
+**Prerequisites:** Tasks 10.1–10.7 are accepted and separately checkpointed;
+the dedicated test-database safety gate, port override, synthetic Provider, and
+precise cleanup conventions are green.
+
+**Files:** New or expanded focused tests such as
+`tests/integration/test_agent_recovery.py`,
+`tests/integration/test_agent_idempotency.py`, and
+`tests/integration/test_agent_audit.py`; update `README.md` with the implemented
+Stage 10 run/approval/SSE contract and safe local workflow. Modify production
+code only through a separate correction task if final testing proves a defect.
+
+**Implementation scope:** With a scripted offline Provider and real
+`postgres-test`, run the public authenticated start, inspect, approval/resume,
+write, and SSE paths. Explicitly discard all process-local workflow/factory
+objects between interrupt and resume, rebuild them, and recover through the
+official Checkpointer plus product identities. Verify approve, reject, edit,
+duplicate/stale resume, cross-user access, process restart, first/partial failure,
+idempotent replay, deterministic two-session duplicate claim, high-impact
+approval, safe audit summary, ordered SSE reconnect, and exact cleanup. Product
+audit reads must use product repositories only and must not expose or depend on
+official Checkpoint table structure.
+
+**Final Stage 10 acceptance matrix:**
+
+| Area | Required proof |
+| --- | --- |
+| Identity | Stable UUID thread/run IDs, authenticated owner derivation, and cross-user safe 404 |
+| Recovery | Interrupt, process-local object loss, rebuilt runtime, and successful Checkpointer resume |
+| Decisions | Approve, reject, edit/revalidate/reapprove, stale and duplicate decision rejection |
+| Writes | Named database idempotency constraint, one winner under concurrency, safe unknown outcome |
+| High impact | Batch/delete require matching durable approval and cannot bypass capability policy |
+| Audit | Product run/approval/execution summaries are bounded and separate from Checkpoint rows |
+| Streaming | Ordered safe SSE, heartbeat, terminal event, reconnect, and disconnect cleanup |
+| Security | No hidden reasoning, credentials, tokens, full prompts/payloads, URLs, or raw diagnostics |
+| Database | Empty upgrade, downgrade to `6e2f9a4c1b73`, re-upgrade, exact constraints, `current`, `heads`, and no drift |
+| Regression | Stage 8/9 offline behavior and all existing auth/project/task contracts remain green |
+
+**Explicitly not included:** No real external Provider call, Stage 11 RAG/
+pgvector/evaluation/tracing implementation, MCP, multi-agent orchestration,
+Redis, queue, Kubernetes, Stage 5 refresh-token work, or destructive shared-data
+cleanup.
+
+**Automated and real verification:** Recreate only disposable `postgres-test`,
+validate driver/host/database/user/configured port, upgrade an empty database to
+head, run all Stage 10 integration tests, downgrade to Stage 9 head
+`6e2f9a4c1b73`, prove all Stage 10 product tables are removed while domain tables
+remain, re-upgrade, run `alembic current`, `heads`, and `check`, then rerun the
+focused recovery suite. Precisely delete only test-owned thread/run/domain data
+in dependency order. Run all ordinary and warnings tests, integration tests,
+Ruff, format, mypy, lock, and diff checks. Finally stop only `postgres-test`;
+never operate on `postgres-dev` or delete volumes.
+
+**Acceptance criteria:** The matrix passes with actual evidence; an interrupted
+workflow survives runtime reconstruction, cannot cross ownership or duplicate a
+write, exposes only safe audit/SSE contracts, and leaves application metadata,
+migrations, and PostgreSQL at the same unique head.
+
+**Learning points:** Recovery testing versus same-process continuation;
+end-to-end consistency across Checkpoint, audit, and domain commits; security
+review of persisted and streamed Agent data.
+
+**Stop boundary:** Task 10.8 completes Stage 10. Stop for owner confirmation. Do
+not begin Stage 11, call a real model, add RAG/pgvector/tracing/evaluations, expose
+MCP, or introduce multi-agent behavior.
 
 ### Stage 11 — Focused RAG, evaluation, security, and tracing
 

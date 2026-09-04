@@ -1,6 +1,8 @@
 """Strict serializable state contracts for the Stage 9 Agent workflow."""
 
+import json
 from enum import StrEnum
+from hashlib import sha256
 from typing import Self
 
 from pydantic import (
@@ -21,6 +23,7 @@ from app.schemas.task import PublicTask, TaskListResponse
 MAX_PLAN_ACTIONS = 3
 MAX_PLAN_REVISIONS = 2
 MAX_SAFE_SUMMARY_LENGTH = 2_000
+PLAN_FINGERPRINT_PATTERN = r"^[0-9a-f]{64}$"
 
 _SERVER_OWNED_ACTION_FIELDS = frozenset(
     {
@@ -165,10 +168,27 @@ class AgentPlanProposal(_FrozenContract):
         return self
 
 
+def fingerprint_plan_proposal(proposal: AgentPlanProposal) -> str:
+    """Return a stable digest that binds validation and approval to one plan."""
+
+    canonical = json.dumps(
+        proposal.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class AgentPlanValidation(_FrozenContract):
     """Expose a stable deterministic validation result without diagnostics."""
 
     status: AgentValidationStatus
+    revision: int = Field(default=0, ge=0, le=MAX_PLAN_REVISIONS)
+    proposal_fingerprint: str | None = Field(
+        default=None,
+        pattern=PLAN_FINGERPRINT_PATTERN,
+    )
     error_code: str | None = Field(
         default=None,
         pattern=r"^[A-Z][A-Z0-9_]{0,63}$",
@@ -176,10 +196,13 @@ class AgentPlanValidation(_FrozenContract):
 
     @model_validator(mode="after")
     def require_consistent_error(self) -> Self:
-        if self.status is AgentValidationStatus.VALID and self.error_code is not None:
-            raise ValueError("A valid plan cannot contain an error code")
-        if self.status is AgentValidationStatus.INVALID and self.error_code is None:
-            raise ValueError("An invalid plan requires an error code")
+        if self.status is AgentValidationStatus.VALID:
+            if self.error_code is not None or self.proposal_fingerprint is None:
+                raise ValueError(
+                    "A valid plan requires a fingerprint and no error code"
+                )
+        elif self.error_code is None or self.proposal_fingerprint is not None:
+            raise ValueError("An invalid plan requires only an error code")
         return self
 
 
@@ -232,6 +255,15 @@ class AgentGraphState(_FrozenContract):
     validation: AgentPlanValidation | None = None
     approval_decision: AgentApprovalDecision | None = None
     approval_feedback: str | None = Field(default=None, max_length=1_000)
+    approval_revision: int | None = Field(
+        default=None,
+        ge=0,
+        le=MAX_PLAN_REVISIONS,
+    )
+    approval_proposal_fingerprint: str | None = Field(
+        default=None,
+        pattern=PLAN_FINGERPRINT_PATTERN,
+    )
     revision_count: int = Field(default=0, ge=0, le=MAX_PLAN_REVISIONS)
     execution_records: tuple[AgentActionExecutionRecord, ...] = Field(
         default=(),

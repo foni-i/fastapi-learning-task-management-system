@@ -31,6 +31,7 @@ from app.agent.state import (
     AgentPlanProposal,
     AgentPlanValidation,
     AgentValidationStatus,
+    fingerprint_plan_proposal,
 )
 from app.agent.tools import validate_tool_arguments
 from app.core.exceptions import (
@@ -137,10 +138,11 @@ def generate_plan(
     raise AssertionError("bounded plan proposal generation did not terminate")
 
 
-def _invalid(code: str) -> AgentPlanValidationUpdate:
+def _invalid(code: str, *, revision: int) -> AgentPlanValidationUpdate:
     return {
         "validation": AgentPlanValidation(
             status=AgentValidationStatus.INVALID,
+            revision=revision,
             error_code=code,
         )
     }
@@ -154,15 +156,15 @@ def validate_plan(
     """Validate the full proposed write batch without opening a gateway."""
 
     if state.analysis is None or state.context is None:
-        return _invalid(PLAN_CONTEXT_MISSING)
+        return _invalid(PLAN_CONTEXT_MISSING, revision=state.revision_count)
     if state.proposal is None:
-        return _invalid(PLAN_PROPOSAL_MISSING)
+        return _invalid(PLAN_PROPOSAL_MISSING, revision=state.revision_count)
     try:
         proposal = AgentPlanProposal.model_validate(
             state.proposal.model_dump(mode="python")
         )
     except TypeError, ValueError, ValidationError:
-        return _invalid(PLAN_PROPOSAL_INVALID)
+        return _invalid(PLAN_PROPOSAL_INVALID, revision=state.revision_count)
 
     try:
         for action in proposal.actions:
@@ -172,7 +174,11 @@ def validate_plan(
                 runtime_context,
             )
     except Exception:
-        return _invalid(PLAN_ACTION_INVALID)
+        return _invalid(PLAN_ACTION_INVALID, revision=state.revision_count)
     return {
-        "validation": AgentPlanValidation(status=AgentValidationStatus.VALID),
+        "validation": AgentPlanValidation(
+            status=AgentValidationStatus.VALID,
+            revision=state.revision_count,
+            proposal_fingerprint=fingerprint_plan_proposal(proposal),
+        ),
     }

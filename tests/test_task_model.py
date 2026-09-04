@@ -39,7 +39,14 @@ def test_task_enums_and_exact_columns() -> None:
         "created_at",
         "updated_at",
     }
-    assert set(Base.metadata.tables) == {"users", "projects", "tasks"}
+    assert set(Base.metadata.tables) == {
+        "users",
+        "projects",
+        "tasks",
+        "agent_threads",
+        "agent_runs",
+        "agent_approvals",
+    }
 
 
 def test_task_types_nullability_and_defaults() -> None:

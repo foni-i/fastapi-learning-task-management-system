@@ -33,7 +33,14 @@ def test_project_registers_in_shared_metadata_with_exact_columns() -> None:
     """Discover users and projects without registering future tables."""
 
     assert Project.metadata is Base.metadata
-    assert set(Base.metadata.tables) == {"users", "projects", "tasks"}
+    assert set(Base.metadata.tables) == {
+        "users",
+        "projects",
+        "tasks",
+        "agent_threads",
+        "agent_runs",
+        "agent_approvals",
+    }
     assert set(Project.__table__.columns.keys()) == EXPECTED_COLUMNS
 
 

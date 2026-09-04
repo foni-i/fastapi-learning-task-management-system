@@ -3372,20 +3372,466 @@ or any Stage 5 deferred authentication work.
 
 ### Stage 9 — Single-Agent LangGraph workflow
 
-Introduce LangGraph only after Stage 8 tools are independently usable. The first
-version is deliberately one Agent with explicit, serializable state.
+Introduce LangGraph only after the independently executable Stage 8 provider,
+schemas, tools, bounded loop, events, and metrics are accepted. This stage builds
+one explicit workflow; it does not add another persistence or authorization
+stack. The dependency direction remains `LangGraph node -> Agent tool -> Domain
+service -> Repository -> PostgreSQL`.
 
-- **Task 9.1:** State contract and graph input/output schemas.
-- **Task 9.2:** `analyze_goal` and `load_context` nodes.
-- **Task 9.3:** `generate_plan` and deterministic `validate_plan` nodes.
-- **Task 9.4:** `request_approval` decision and plan-edit conditional loop.
-- **Task 9.5:** `execute_tasks` through approved tools with bounded steps.
-- **Task 9.6:** `verify_result` and `summarize` nodes.
-- **Task 9.7:** Graph composition, conditional branches, failures, and tests.
+The graph carries only strict JSON-serializable state. Authenticated identity,
+provider objects, the Tool gateway, clocks, and an in-process approval adapter are
+trusted runtime dependencies outside state and outside model-visible schemas.
+State may contain validated goals, safe analysis, bounded public Project/Task
+context, a validated plan proposal, approval outcome, safe execution records,
+verification, public summary, counters, and stable local error codes. It never
+contains a Session, connection, transaction, ORM object, repository, service,
+provider client, API key, access token, complete prompt/response, raw tool
+payload, database diagnostic, or hidden reasoning.
 
-Stage 9 can model approval decisions in one process, but durable interrupt/resume
-and service-restart recovery belong to Stage 10. State contains no Session, ORM
-object, provider client, key, or hidden reasoning.
+Stage 9 deliberately has no checkpoint. Approval can be supplied by a controlled
+in-process test/host adapter, and a bounded edit decision can revisit planning.
+Durable pause/resume, service-restart recovery, business run/approval records,
+official PostgreSQL checkpoints, stable `thread_id`/`run_id`, idempotency across
+replay, and SSE transport remain Stage 10 responsibilities.
+
+The result milestones are:
+
+1. Tasks 9.1–9.3: a validated goal becomes a serializable, context-backed,
+   deterministically validated plan proposal through independently tested nodes.
+2. Tasks 9.4–9.5: a trusted in-process approval/edit decision gates a small,
+   bounded set of existing Task write tools; rejected plans cause no writes.
+3. Tasks 9.6–9.7: verification and public summary nodes are composed into one
+   offline-tested LangGraph with bounded conditional branches and safe failures.
+
+### Task 9.1 — State contract and graph input/output schemas
+
+**Estimated time:** 1–2 focused hours. **Network/external provider/real
+PostgreSQL:** not required. **New dependency:** none; LangGraph is not yet needed
+to define pure state contracts.
+
+**Goal:** Define the complete strict, bounded, serializable data contract that all
+Stage 9 nodes exchange, without putting trusted runtime objects or identity under
+model control.
+
+**Prerequisites:** Stage 8 is accepted and committed; its `PlanningGoal`,
+`PlanningResult`, public Project/Task schemas, tool allowlist, runtime context,
+safe metrics, and error conventions are stable.
+
+**Files:** New `app/agent/state.py`, focused `tests/test_agent_state.py`, and
+`app/agent/__init__.py` only if the existing export style requires an explicit
+public internal contract. Do not create graph or node modules yet.
+
+**Implementation scope:** Add frozen Pydantic 2 contracts for the graph input,
+state, and public output plus their supporting enums/records. The input contains
+only one validated `PlanningGoal`; authenticated `user_id` remains solely in
+`AgentRuntimeContext`. Define bounded values for: deterministic goal analysis;
+the first bounded page of public Project and Task context; a plan proposal that
+pairs the existing `PlanningResult` with zero to three proposed Task write
+actions; approval decision and bounded edit feedback; revision count with a
+maximum of two edits; safe action execution records; verification; terminal
+outcome; and a concise public summary. Proposed actions have a unique bounded
+action key, a tool name restricted to `create_task` or `update_task`, and strict
+arguments later validated through the existing Tool contract. They cannot carry
+`user_id`, Session, transaction options, timestamps owned by the server, or
+arbitrary internal fields.
+
+**Interfaces and contracts:** Node updates are partial mappings over one canonical
+`AgentGraphState`; they may change only fields owned by that node. State and
+output round-trip through JSON. The public `AgentGraphOutput` is an explicit
+whitelist containing only terminal status, the accepted public plan when
+available, a safe summary, safe execution records/public Task results as
+specified by the accepted contract, and safe aggregate metrics/counters. It does
+not dump the internal state.
+
+**Explicitly not included:** No LangGraph import, Node, graph, Router, Session,
+database access, model call, Tool execution, approval UI, checkpoint, run table,
+SSE, or migration.
+
+**Automated tests:** Cover valid minimal and fully populated state; exact fields;
+extra-field rejection; all collection/text/count bounds; unique action keys;
+write-tool-only action names; no model-supplied identity/internal fields; edit
+limit; aware/JSON-safe values; immutable models; JSON round trips; explicit
+public output whitelist; and dumps/errors that exclude secrets, complete tokens,
+hidden reasoning, Sessions, ORM objects, prompts, and raw provider/tool payloads.
+
+**Focused validation commands:** Run `tests/test_agent_state.py` plus existing
+Agent schema/tool tests, then Ruff, format check, mypy, lock check, and diff
+check. Do not start Docker or call a provider.
+
+**Acceptance criteria:** Every later Node has one unambiguous serializable input
+and output field contract; trusted identity and runtime dependencies cannot enter
+model-controlled data; invalid or oversized state fails before orchestration.
+
+**Learning points:** Reducer-safe state design; public output versus internal
+workflow state; serializability as a recovery prerequisite.
+
+**Stop boundary:** Stop after pure schemas. Do not add LangGraph, nodes, provider
+calls, tools, approvals, graph composition, or persistence.
+
+### Task 9.2 — `analyze_goal` and `load_context` nodes
+
+**Estimated time:** 1–2 focused hours. **External provider/network/real
+PostgreSQL:** not required; deterministic fakes prove the behavior.
+
+**Goal:** Turn the validated goal into a transparent safe analysis and load the
+bounded owner-scoped context needed for planning through existing read tools.
+
+**Prerequisites:** Task 9.1 state contracts are accepted; the Stage 8 read Tool
+schemas and trusted `AgentRuntimeContext` boundary remain unchanged.
+
+**Files:** New `app/agent/nodes/__init__.py` and
+`app/agent/nodes/context.py`, focused `tests/test_agent_context_nodes.py`, and
+minimal state/schema adjustments only if a focused test exposes an omission in
+Task 9.1.
+
+**Implementation scope:** Implement two independently callable synchronous node
+functions. `analyze_goal` deterministically validates/normalizes the existing
+goal and records only a concise objective, bounded constraints, and an allowlist
+of required context (`projects`, `tasks`); it does not invent facts or persist
+chain-of-thought. The initial MVP loads both context kinds. `load_context` invokes
+only `list_projects` and `list_tasks` through the existing `execute_tool` boundary
+with fixed bounded first-page arguments and a read-only trusted runtime context.
+It stores only existing `ProjectListResponse`/`TaskListResponse` public data.
+
+**Interfaces and contracts:** Node dependencies are injected by trusted host
+code, not stored in state. `load_context` never calls `AgentDomainGateway`, a
+Service, repository, or Session directly. Model text cannot select identity,
+enable writes, change pagination bounds, or choose a new tool. Repeated pure
+analysis is deterministic; read context loading performs no commit.
+
+**Explicitly not included:** No model-based hidden analysis, write Tool, plan
+generation, approval, graph edge, LangGraph dependency, direct database call,
+context persistence, RAG, or unbounded Project/Task loading.
+
+**Automated tests:** Cover exact node-owned updates; deterministic analysis;
+fixed bounded read arguments; both read tools and no write tools; trusted identity
+forwarding outside arguments; public context fields; empty context; existing
+owner-safe 404/error behavior; one Tool call per required context kind; no commit;
+safe failure without payload echo; no mutation of input state; JSON-safe updates;
+and static proof that node code imports neither SQLAlchemy nor repositories.
+
+**Focused validation commands:** Run context-node, state, read-tool, Project-list,
+and Task-list focused tests, then Ruff, format check, mypy, lock, and diff. Use no
+Docker or external model.
+
+**Acceptance criteria:** A validated goal produces a transparent bounded analysis
+and owner-scoped public context using only the accepted Agent Tool boundary; no
+trusted dependency is serialized into state.
+
+**Learning points:** Node-local state updates; deterministic analysis versus
+hidden reasoning; graph reuse of capability-safe Tools.
+
+**Stop boundary:** Stop after the two context nodes. Do not generate a plan, add
+write actions, approvals, conditional edges, LangGraph, or persistence.
+
+### Task 9.3 — `generate_plan` and deterministic `validate_plan` nodes
+
+**Estimated time:** 1–2 focused hours. **Real PostgreSQL:** not required.
+**External provider:** forbidden for acceptance; use the reusable Stage 8 fake.
+
+**Goal:** Produce a strict plan proposal from the validated goal/analysis/context
+and deterministically reject malformed, unsafe, or non-executable proposals
+before any approval or write.
+
+**Prerequisites:** Tasks 9.1–9.2 are accepted; Stage 8 provider, prompt version,
+bounded failure, Tool argument validation, and metrics contracts are stable.
+
+**Files:** New `app/agent/nodes/planning.py`, focused
+`tests/test_agent_planning_nodes.py`, and minimal extensions to
+`app/agent/prompts.py`, `app/agent/planning.py`, or `app/agent/state.py` only when
+needed to pass the accepted bounded context/proposal contract. Preserve every
+Stage 8 public/internal behavior and regression test.
+
+**Implementation scope:** `generate_plan` builds versioned provider input from
+the validated goal plus the bounded public context snapshot, requests the exact
+plan-proposal JSON schema, and uses the existing provider/error/timeout boundary
+rather than raw SDK calls. It may propose at most three individual
+`create_task`/`update_task` actions and cannot execute them. `validate_plan` is
+pure deterministic code: revalidate `PlanningResult`, prompt version, step/action
+bounds and unique keys; validate the entire proposed action batch with
+`validate_tool_arguments` against a trusted write-capable context without
+creating a gateway/Session; and return a stable validation result or safe local
+error codes. Any invalid action rejects the whole proposal before approval.
+
+**Interfaces and contracts:** Loaded Project/Task data remains untrusted context,
+not instructions. Provider keys, requests, complete responses, hidden reasoning,
+identity, and raw validation diagnostics never enter state or errors. Provider
+attempts remain bounded and observable through the existing safe metrics. No
+write occurs in either node.
+
+**Explicitly not included:** No Tool dispatch, transaction, approval, automatic
+self-correction, unbounded retry, graph edge, LangGraph dependency, public API,
+checkpoint, or database write.
+
+**Automated tests:** Cover valid proposal; zero-action informational plan; one to
+three valid actions; fourth-action rejection; duplicate action keys; forbidden
+read/unknown tools in the execution proposal; invalid/extra arguments; attempted
+`user_id`/internal fields; missing context; wrong prompt version; malformed model
+output; provider timeout/transient/auth failures; exact attempt bounds; no Tool or
+Session creation during validation; deterministic validation; safe state updates;
+metrics; JSON round trip; and no secrets/prompts/raw responses/tool payloads in
+errors or records.
+
+**Focused validation commands:** Run planning-node, state/context-node, Stage 8
+planning/loop/provider/Tool focused tests, then Ruff, format check, mypy, lock,
+and diff. Do not start Docker or use a real provider.
+
+**Acceptance criteria:** An offline scripted provider can turn bounded public
+context into one strict proposal; deterministic validation proves every planned
+write is in the existing allowlist and argument contract; no action has executed.
+
+**Learning points:** Model proposal versus deterministic acceptance; validating
+commands before authority is granted; bounded context assembly.
+
+**Stop boundary:** Tasks 9.1–9.3 form the first Stage 9 result milestone. Stop
+for review; do not add approval, execute tools, compose a graph, install
+LangGraph, or enter Stage 10.
+
+### Task 9.4 — `request_approval` decision and bounded plan-edit loop
+
+**Estimated time:** 1–2 focused hours. **Network/external provider/real
+PostgreSQL:** not required.
+
+**Goal:** Require an explicit trusted in-process decision before proposed writes
+and define deterministic routing for approve, reject, or bounded plan revision.
+
+**Prerequisites:** Task 9.3 is accepted; only a deterministically valid proposal
+may enter approval.
+
+**Files:** New `app/agent/nodes/approval.py` and
+`app/agent/routing.py`, focused `tests/test_agent_approval_nodes.py`, and minimal
+state contract adjustments only if the accepted decision shape requires them.
+
+**Implementation scope:** Define a narrow synchronous `ApprovalDecider` Protocol
+implemented by controlled host/test code. `request_approval` receives only a safe
+plan summary and action names/count—not raw credentials or hidden reasoning—and
+stores its strict decision. Allow `approved`, `rejected`, or `request_changes`;
+change feedback is bounded, treated as untrusted data, and never grants tools or
+identity. A routing function sends approval to execution, rejection to summary,
+or change requests back to plan generation. Permit at most two revisions; the
+third request fails closed with a stable local outcome. Each return to planning
+must pass `validate_plan` again before another approval decision.
+
+**Interfaces and contracts:** Approval is supplied outside model output. The
+model cannot mark its own proposal approved. Rejection and exhausted revisions
+execute no writes. Routing functions are pure and return only allowlisted route
+enums/names suitable for later conditional edges.
+
+**Explicitly not included:** No durable interrupt, resume token, HTTP approval
+endpoint, UI, polling, checkpoint, business approval row, service-restart
+recovery, write execution, LangGraph composition, or Stage 10 behavior.
+
+**Automated tests:** Cover all three decisions; decision/feedback validation;
+approval only after valid plan; exact safe payload sent to the decider; no model
+self-approval; zero writes on reject/change; first and second revisions; third
+revision rejection; revalidation requirement; deterministic route names; fake
+decision sequences; serialization/redaction; and no user identity, action
+arguments, secrets, complete prompts, responses, tokens, or hidden reasoning in
+the approval request/state/error.
+
+**Focused validation commands:** Run approval/routing, planning-node, and state
+focused tests, then Ruff, format check, mypy, lock, and diff. No Docker, provider,
+or database is required.
+
+**Acceptance criteria:** Every proposed write is gated by a trusted explicit
+decision; reject and exhausted-edit paths are safe and terminating; the edit loop
+has an exact bound and cannot bypass deterministic revalidation.
+
+**Learning points:** Human authority versus model suggestion; conditional route
+purity; bounding iterative feedback.
+
+**Stop boundary:** Stop after in-process approval and routing logic. Do not
+execute actions, add LangGraph edges, persist approval, interrupt/resume, or add
+an approval API.
+
+### Task 9.5 — `execute_tasks` through approved tools with bounded steps
+
+**Estimated time:** 1–2 focused hours. **External provider:** not required.
+**Real PostgreSQL:** optional only if a focused defect requires proof; ordinary
+acceptance uses the existing Tool/gateway fakes.
+
+**Goal:** Execute only a deterministically valid and explicitly approved set of
+individual Task writes through the existing capability-safe Agent Tool boundary.
+
+**Prerequisites:** Task 9.4 is accepted; state proves current proposal validation
+and approval, and trusted runtime policy independently enables write tools.
+
+**Files:** New `app/agent/nodes/execution.py`, focused
+`tests/test_agent_execution_node.py`, and minimal state/routing changes only when
+required by the accepted execution-record contract.
+
+**Implementation scope:** `execute_tasks` verifies approval and validation again,
+then sequentially dispatches at most three proposed actions through existing
+`execute_tool` with the separately injected `AgentRuntimeContext`. It supports
+only `create_task` and `update_task`; it never supplies identity from state. Stop
+at the first failure, never retry or parallelize a write, and record only bounded
+safe action key/tool/outcome and accepted public `PublicTask` data. Existing
+Services retain owner checks and one transaction per Tool call; the gateway owns
+Session creation/closure. Earlier committed actions are not falsely presented as
+rolled back if a later independent action fails.
+
+**Interfaces and contracts:** Plan-wide in-process approval does not expand the
+Tool allowlist. The complete action batch was validated before the first write,
+and each action is revalidated immediately before dispatch. No delete, complete,
+Project write, bulk primitive, caller-selected transaction, or automatic replay
+is available. Durable idempotency and safe resume arrive in Stage 10.
+
+**Explicitly not included:** No Repository/Session import in node code, cross-tool
+atomic transaction, retry, compensation, delete, batch API, checkpoint,
+idempotency table/key, public Router, LangGraph composition, or external model.
+
+**Automated tests:** Cover one and three approved actions; zero-action plan;
+trusted identity forwarding outside arguments; approval and validation required;
+write-disabled runtime rejection; sequential order; exact allowlist; foreign or
+missing resources retaining safe domain errors; first-failure stop; no retry;
+accurate partial-success records; Service-owned commit/rollback; one closed
+Session per dispatched Tool in gateway tests; public-field output; input state
+immutability; and no sensitive arguments, identity, SQL, diagnostics, secrets, or
+hidden reasoning in records/errors.
+
+**Focused validation commands:** Run execution-node, approval, write/read Tool,
+Task Service/ownership, and state tests, then the full ordinary suite, Ruff,
+format check, mypy, lock, and diff. Start guarded `postgres-test` only if a real
+database defect is demonstrated; never call an external provider.
+
+**Acceptance criteria:** Only validated approved actions execute, through Tool ->
+Domain Service -> owner-scoped Repository; every branch terminates, failures are
+not retried, and records truthfully represent independently committed writes.
+
+**Learning points:** Approval as a necessary but not sufficient capability;
+partial success across use-case transactions; safe command execution records.
+
+**Stop boundary:** Tasks 9.4–9.5 form the second Stage 9 result milestone. Stop
+for review; do not add verification/summary, compile LangGraph, persist state,
+add idempotency, or enter Stage 10.
+
+### Task 9.6 — `verify_result` and `summarize` nodes
+
+**Estimated time:** 1–2 focused hours. **Network/external provider/real
+PostgreSQL:** not required.
+
+**Goal:** Deterministically verify the graph's recorded outcome and produce one
+strict public summary without exposing internal state or claiming work that did
+not complete.
+
+**Prerequisites:** Task 9.5 is accepted; execution records distinguish full,
+partial, rejected, and failed paths.
+
+**Files:** New `app/agent/nodes/finalization.py`, focused
+`tests/test_agent_finalization_nodes.py`, and minimal state contract refinements
+needed for the accepted verification/output whitelist.
+
+**Implementation scope:** `verify_result` compares the valid approved action set
+with ordered execution records, verifies action key/tool/result consistency, and
+classifies no-action success, full success, partial failure, rejected, and safe
+failure without querying the database or model. `summarize` deterministically
+creates `AgentGraphOutput` from verified state, the accepted public plan, public
+Task results, safe counters/metrics, and bounded fixed-format summaries. It does
+not summarize hidden reasoning or raw errors and never turns failure into success.
+
+**Interfaces and contracts:** Verification is based on validated records, not
+free-form model claims. Public output is a strict whitelist and never exposes
+analysis, approval feedback, action arguments, complete tool results beyond
+accepted public schemas, identity, internal routes, provider data, or state dump.
+
+**Explicitly not included:** No fresh model call, database read, compensation,
+retry, tracing vendor, persistence, HTTP response/SSE, LangGraph composition,
+checkpoint, or evaluation framework.
+
+**Automated tests:** Cover no-action/full/partial/rejected/failed paths; record
+count/order/action mismatch; duplicate records; safe metrics propagation; strict
+output fields; truthful status; bounded summaries; deterministic repeated output;
+JSON round trip; no database/provider/tool use; and redaction of identity,
+arguments, prompts, responses, credentials, diagnostics, feedback, and hidden
+reasoning.
+
+**Focused validation commands:** Run finalization, execution, approval, state,
+and metrics focused tests, then Ruff, format check, mypy, lock, and diff. No
+Docker or external provider.
+
+**Acceptance criteria:** All terminal paths produce one truthful validated public
+output or a stable safe failure; verification cannot be overridden by model text;
+internal workflow state is not serialized as the response.
+
+**Learning points:** Verification independent of generation; truthful partial
+failure reporting; anti-corruption output boundaries.
+
+**Stop boundary:** Stop after independent finalization nodes. Do not install or
+compile LangGraph, expose an API, persist results, or add Stage 10 behavior.
+
+### Task 9.7 — Graph composition, conditional branches, failures, and tests
+
+**Estimated time:** 1–2 focused hours. **External provider/real PostgreSQL:** not
+required for acceptance. **New dependency:** the minimal maintained LangGraph
+package is added here, because this is the first Task that imports it.
+
+**Goal:** Compose the eight accepted Nodes into one deterministic, terminating,
+offline-tested single-Agent LangGraph while preserving trusted runtime and Stage
+10 boundaries.
+
+**Prerequisites:** Tasks 9.1–9.6 and all independent node tests are accepted;
+Stage 8 provider/Tool fakes remain green; no unresolved state or routing contract
+exists.
+
+**Files:** New `app/agent/graph.py`, focused `tests/test_agent_graph.py`, minimal
+exports, `pyproject.toml`, and `uv.lock`. Existing node/state modules may receive
+only integration fixes required by composition. Before adding the dependency,
+verify its official synchronous API, current Python 3.14 support, Pydantic
+compatibility, and `uv` resolution. Select and record a narrow compatible range
+without upgrading unrelated packages; do not add checkpointer/provider extras.
+
+**Implementation scope:** Build a graph with exactly these logical nodes:
+`analyze_goal`, `load_context`, `generate_plan`, `validate_plan`,
+`request_approval`, `execute_tasks`, `verify_result`, and `summarize`. Use explicit
+START/END edges and pure allowlisted route functions. The normal route is
+analysis -> context -> generation -> validation -> approval -> execution ->
+verification -> summary. Rejected plans route to summary without writes; change
+requests return to generation only within the two-revision bound and must pass
+validation again; invalid/failure paths terminate safely. Build/compile receives
+provider, gateway, trusted context, approval adapter, and clocks as host-owned
+dependencies or closures outside graph state.
+
+**Interfaces and contracts:** Invoke with strict `AgentGraphInput` and return only
+`AgentGraphOutput`. No recursion/step limit is caller controlled; configure a
+fixed ceiling consistent with the finite edge/revision bounds and fail closed if
+exceeded. Use the synchronous graph API because the application/domain stack is
+synchronous. Ordinary execution uses deterministic fakes and never reads a real
+provider key.
+
+**Explicitly not included:** No checkpointer, persistence, database migration,
+`thread_id`/`run_id`, durable interrupt/resume, service-restart recovery,
+idempotency/replay, approval Router, public Agent HTTP endpoint, SSE/WebSocket,
+background worker, RAG, tracing vendor, MCP, multi-agent, AsyncSession, or Stage
+10 code.
+
+**Automated tests:** Cover graph structure and exact node names; happy no-action
+and approved-action paths; reject path with zero writes; one/two edit cycles;
+third-edit safe termination; validation failure; provider/context/tool/approval
+failure; partial execution; exact edge order; revalidation before every approval;
+fixed recursion ceiling; one terminal output; serializable state updates; runtime
+identity isolation; provider/gateway/approval fake injection; no real network or
+database; public output whitelist; and no Sessions, ORM objects, clients, keys,
+tokens, prompts, raw payloads, diagnostics, or hidden reasoning in state/errors.
+
+**Focused validation commands:** Run `tests/test_agent_graph.py`, every Stage 9
+node/state test, all Stage 8 Agent regressions, and affected Task Service/Tool
+tests. Then run the full ordinary and warnings suites, Ruff, format check, mypy,
+`uv lock --check`, and `git diff --check`. Confirm default pytest still excludes
+`integration` and `external_provider`. Do not start Docker or call a real model.
+
+**Acceptance criteria:** A scripted offline provider and fake approval adapter
+drive the complete graph through success, reject, edit, and failure branches;
+every route terminates within exact bounds; writes require trusted approval and
+Tool capability; output is strict and safe; no Stage 10 persistence behavior is
+present.
+
+**Learning points:** Graph composition from independently tested nodes;
+conditional cycles with hard termination; runtime dependencies versus persisted
+state.
+
+**Stop boundary:** Task 9.7 completes Stage 9. Stop for owner confirmation. Do
+not expose a public Agent API, add checkpoint/persistence/HITL recovery/SSE, begin
+Stage 10, add RAG, MCP, multi-agent behavior, or resume deferred Stage 5 work.
 
 ### Stage 10 — Persistence, HITL, and streaming
 

@@ -99,6 +99,43 @@ def create_task(
         raise
 
 
+def create_task_batch(
+    task_inputs: tuple[TaskCreate, ...],
+    user_id: UUID,
+    session: Session,
+    *,
+    task_repository_factory: TaskRepositoryFactory = TaskRepository,
+    project_repository_factory: ProjectRepositoryFactory = ProjectRepository,
+) -> tuple[PublicTask, ...]:
+    """Create one bounded same-Project batch in a single Service transaction."""
+
+    if not 1 <= len(task_inputs) <= 10:
+        raise ValueError("Task batch must contain between one and ten items")
+    project_id = task_inputs[0].project_id
+    if any(item.project_id != project_id for item in task_inputs):
+        raise ValueError("Task batch must target one project")
+    project = project_repository_factory(session).get_owned_by_id(
+        project_id=project_id,
+        user_id=user_id,
+    )
+    if project is None:
+        raise ProjectNotFoundError(PROJECT_NOT_FOUND_MESSAGE)
+
+    repository = task_repository_factory(session)
+    try:
+        created: list[PublicTask] = []
+        for task_input in task_inputs:
+            values = task_input.model_dump()
+            values["priority"] = task_input.priority.value
+            task = repository.create(user_id=user_id, **values)
+            created.append(PublicTask.model_validate(task))
+        session.commit()
+        return tuple(created)
+    except Exception:
+        session.rollback()
+        raise
+
+
 def get_owned_task(
     task_id: UUID,
     user_id: UUID,

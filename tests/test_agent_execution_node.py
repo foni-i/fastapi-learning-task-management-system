@@ -38,6 +38,7 @@ from app.agent.state import (
 from app.agent.tools import AgentToolGateway, AgentToolResult
 from app.core.exceptions import ProjectNotFoundError, TaskNotFoundError
 from app.models import TaskPriority, TaskStatus
+from app.schemas.agent_tool import AgentToolMutationResult
 from app.schemas.project import ProjectListResponse
 from app.schemas.task import PublicTask, TaskListResponse
 
@@ -152,6 +153,38 @@ def _approved_state(*, action_count: int = 1) -> tuple[AgentGraphState, UUID]:
     )
     state = state.model_copy(update=request_approval(state, decider=Approver()))
     return state, user_id
+
+
+def _approved_high_impact_state() -> tuple[AgentGraphState, UUID]:
+    state, user_id = _approved_state()
+    assert state.proposal is not None
+    proposal = state.proposal.model_copy(
+        update={
+            "actions": (
+                AgentProposedAction(
+                    action_key="delete-one",
+                    tool_name=AgentWriteToolName.DELETE_TASK,
+                    arguments={"task_id": str(uuid4())},
+                ),
+            )
+        }
+    )
+    unapproved = state.model_copy(
+        update={
+            "proposal": proposal,
+            "validation": None,
+            "approval_decision": None,
+            "approval_revision": None,
+            "approval_proposal_fingerprint": None,
+        }
+    )
+    context = AgentRuntimeContext(user_id=user_id, write_tools_enabled=True)
+    validated = unapproved.model_copy(
+        update=validate_plan(unapproved, runtime_context=context)
+    )
+    return validated.model_copy(
+        update=request_approval(validated, decider=Approver())
+    ), user_id
 
 
 @pytest.mark.parametrize("action_count", [1, 3])
@@ -365,6 +398,59 @@ def test_execution_records_expose_only_public_task_fields() -> None:
     assert "arguments" not in serialized
     assert "sql" not in serialized.lower()
     assert "reasoning" not in serialized
+
+
+def test_high_impact_action_cannot_bypass_persisted_action_executor() -> None:
+    state, user_id = _approved_high_impact_state()
+    dispatcher = RecordingDispatcher([_task()])
+
+    with pytest.raises(
+        AgentExecutionNotAuthorizedError,
+        match=AGENT_EXECUTION_NOT_AUTHORIZED_MESSAGE,
+    ):
+        execute_tasks(
+            state,
+            runtime_context=AgentRuntimeContext(
+                user_id=user_id, write_tools_enabled=True
+            ),
+            dispatcher=dispatcher,
+        )
+
+    assert dispatcher.calls == []
+
+
+def test_high_impact_action_uses_current_approval_identity() -> None:
+    state, user_id = _approved_high_impact_state()
+    calls: list[tuple[int, str]] = []
+    result = AgentToolMutationResult(
+        operation="delete_task",
+        reference_task_id=uuid4(),
+        affected_count=1,
+        summary="Task deleted",
+    )
+
+    def action_executor(
+        action: AgentProposedAction,
+        *,
+        revision: int,
+        proposal_fingerprint: str,
+        runtime_context: AgentRuntimeContext,
+    ) -> AgentToolMutationResult:
+        assert action.tool_name is AgentWriteToolName.DELETE_TASK
+        assert runtime_context.user_id == user_id
+        calls.append((revision, proposal_fingerprint))
+        return result
+
+    update = execute_tasks(
+        state,
+        runtime_context=AgentRuntimeContext(user_id=user_id, write_tools_enabled=True),
+        action_executor=action_executor,
+    )
+
+    assert state.approval_revision is not None
+    assert state.approval_proposal_fingerprint is not None
+    assert calls == [(state.approval_revision, state.approval_proposal_fingerprint)]
+    assert update["execution_records"][0].result == result
 
 
 def test_execution_node_has_no_persistence_service_or_http_dependency() -> None:

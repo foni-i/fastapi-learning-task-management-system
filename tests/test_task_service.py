@@ -30,11 +30,115 @@ from app.schemas.task import (
 from app.services.tasks import (
     complete_owned_task,
     create_task,
+    create_task_batch,
     delete_owned_task,
     get_owned_task,
     list_owned_tasks,
     update_owned_task,
 )
+
+
+def test_batch_create_uses_one_owned_project_and_one_atomic_commit() -> None:
+    session = MagicMock(spec=Session)
+    owner_id, project_id = uuid4(), uuid4()
+    project_repository = MagicMock(spec=ProjectRepository)
+    project_repository.get_owned_by_id.return_value = Project(
+        id=project_id,
+        user_id=owner_id,
+    )
+    task_repository = MagicMock(spec=TaskRepository)
+    task_repository.create.side_effect = [
+        populated_task(owner_id, project_id, "First"),
+        populated_task(owner_id, project_id, "Second"),
+    ]
+    inputs = (
+        TaskCreate(project_id=project_id, title="First"),
+        TaskCreate(project_id=project_id, title="Second"),
+    )
+
+    result = create_task_batch(
+        inputs,
+        owner_id,
+        session,
+        project_repository_factory=lambda received: cast(
+            ProjectRepository, project_repository
+        ),
+        task_repository_factory=lambda received: cast(TaskRepository, task_repository),
+    )
+
+    project_repository.get_owned_by_id.assert_called_once_with(
+        project_id=project_id,
+        user_id=owner_id,
+    )
+    assert task_repository.create.call_count == 2
+    session.commit.assert_called_once_with()
+    session.rollback.assert_not_called()
+    assert [item.title for item in result] == ["First", "Second"]
+    assert all("user_id" not in item.model_dump() for item in result)
+
+
+def test_batch_create_rolls_back_all_items_when_one_write_fails() -> None:
+    session = MagicMock(spec=Session)
+    owner_id, project_id = uuid4(), uuid4()
+    project_repository = MagicMock(spec=ProjectRepository)
+    project_repository.get_owned_by_id.return_value = Project(
+        id=project_id,
+        user_id=owner_id,
+    )
+    task_repository = MagicMock(spec=TaskRepository)
+    failure = RuntimeError("controlled batch failure")
+    task_repository.create.side_effect = [
+        populated_task(owner_id, project_id, "First"),
+        failure,
+    ]
+
+    with pytest.raises(RuntimeError) as error:
+        create_task_batch(
+            (
+                TaskCreate(project_id=project_id, title="First"),
+                TaskCreate(project_id=project_id, title="Second"),
+            ),
+            owner_id,
+            session,
+            project_repository_factory=lambda received: cast(
+                ProjectRepository, project_repository
+            ),
+            task_repository_factory=lambda received: cast(
+                TaskRepository, task_repository
+            ),
+        )
+
+    assert error.value is failure
+    session.rollback.assert_called_once_with()
+    session.commit.assert_not_called()
+
+
+@pytest.mark.parametrize("count", [0, 11])
+def test_batch_create_rejects_outside_bounds_before_persistence(count: int) -> None:
+    session = MagicMock(spec=Session)
+    project_repository = MagicMock(spec=ProjectRepository)
+    task_repository = MagicMock(spec=TaskRepository)
+    project_id = uuid4()
+    inputs = tuple(
+        TaskCreate(project_id=project_id, title=f"Task {index}")
+        for index in range(count)
+    )
+    with pytest.raises(ValueError):
+        create_task_batch(
+            inputs,
+            uuid4(),
+            session,
+            project_repository_factory=lambda received: cast(
+                ProjectRepository, project_repository
+            ),
+            task_repository_factory=lambda received: cast(
+                TaskRepository, task_repository
+            ),
+        )
+    project_repository.get_owned_by_id.assert_not_called()
+    task_repository.create.assert_not_called()
+    session.commit.assert_not_called()
+    session.rollback.assert_not_called()
 
 
 def populated_task(

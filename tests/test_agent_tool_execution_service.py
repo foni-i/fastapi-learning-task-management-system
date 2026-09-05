@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -10,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.context import AgentRuntimeContext
 from app.agent.state import AgentProposedAction, AgentWriteToolName
-from app.agent.tools import AgentToolGateway
+from app.agent.tools import AgentToolGateway, AgentWriteToolResult
 from app.core.exceptions import (
     AgentToolReconciliationRequiredError,
     TaskNotFoundError,
@@ -20,7 +21,9 @@ from app.models.agent_tool_execution import (
     AgentToolExecutionStatus,
 )
 from app.models.task import TaskPriority, TaskStatus
+from app.repositories.agent_runs import AgentRunRepository
 from app.repositories.agent_tool_executions import AgentToolExecutionRepository
+from app.schemas.agent_tool import AgentToolMutationResult
 from app.schemas.task import PublicTask
 from app.services.agent_tool_executions import AgentToolExecutionCoordinator
 
@@ -167,7 +170,7 @@ def _coordinator(
     user_id: UUID,
     store: dict[tuple[object, ...], AgentToolExecution],
     sessions: list[FakeSession],
-    dispatcher: Callable[..., PublicTask],
+    dispatcher: Callable[..., AgentWriteToolResult],
     loaded: PublicTask,
 ) -> AgentToolExecutionCoordinator:
     def session_factory() -> Session:
@@ -192,6 +195,29 @@ def _coordinator(
         dispatcher=dispatcher,
         task_loader=task_loader,
     )
+
+
+def _high_impact_action() -> AgentProposedAction:
+    return AgentProposedAction(
+        action_key="delete-one",
+        tool_name=AgentWriteToolName.DELETE_TASK,
+        arguments={"task_id": str(uuid4())},
+    )
+
+
+def _approval_factory(
+    *, decision: str = "APPROVED", fingerprint: str = "e" * 64, present: bool = True
+) -> Callable[[Session], AgentRunRepository]:
+    class ApprovalRepository:
+        def get_owned_approval(self, **values: object) -> object | None:
+            if not present:
+                return None
+            return SimpleNamespace(
+                decision=decision,
+                proposal_fingerprint=fingerprint,
+            )
+
+    return lambda session: cast(AgentRunRepository, ApprovalRepository())
 
 
 def test_first_execution_is_claimed_and_completed_then_replayed_without_tool() -> None:
@@ -413,3 +439,156 @@ def test_failure_recording_after_domain_success_marks_unknown_and_never_retries(
         )
     assert tool_calls == 1
     assert all(session.closed for session in sessions)
+
+
+def test_high_impact_action_requires_matching_persisted_approval_and_replays() -> None:
+    run_id = uuid4()
+    user_id = uuid4()
+    fingerprint = "e" * 64
+    store: dict[tuple[object, ...], AgentToolExecution] = {}
+    sessions: list[FakeSession] = []
+    tool_calls = 0
+    task_id = uuid4()
+    result = AgentToolMutationResult(
+        operation="delete_task",
+        reference_task_id=task_id,
+        affected_count=1,
+        summary="Task deleted",
+    )
+
+    def session_factory() -> Session:
+        session = FakeSession()
+        sessions.append(session)
+        return cast(Session, session)
+
+    def dispatcher(*args: object, **kwargs: object) -> AgentToolMutationResult:
+        nonlocal tool_calls
+        tool_calls += 1
+        return result
+
+    coordinator = AgentToolExecutionCoordinator(
+        run_id=run_id,
+        user_id=user_id,
+        gateway=cast(AgentToolGateway, object()),
+        session_factory=session_factory,
+        repository_factory=lambda session: MemoryRepository(session, store),
+        approval_repository_factory=_approval_factory(fingerprint=fingerprint),
+        dispatcher=dispatcher,
+    )
+    context = AgentRuntimeContext(user_id=user_id, write_tools_enabled=True)
+
+    first = coordinator(
+        _high_impact_action(),
+        revision=1,
+        proposal_fingerprint=fingerprint,
+        runtime_context=context,
+    )
+    replay = coordinator(
+        _high_impact_action(),
+        revision=1,
+        proposal_fingerprint=fingerprint,
+        runtime_context=context,
+    )
+
+    assert first == replay == result
+    assert tool_calls == 1
+    assert len(store) == 1
+    assert next(iter(store.values())).status == "COMPLETED"
+    assert all(session.closed for session in sessions)
+
+
+@pytest.mark.parametrize(
+    ("present", "decision", "stored_fingerprint"),
+    [
+        (False, "APPROVED", "e" * 64),
+        (True, "PENDING", "e" * 64),
+        (True, "REJECTED", "e" * 64),
+        (True, "REQUEST_CHANGES", "e" * 64),
+        (True, "APPROVED", "f" * 64),
+    ],
+    ids=["missing-or-wrong-run", "pending", "rejected", "changes", "stale"],
+)
+def test_invalid_persisted_approval_fails_before_claim_or_domain_call(
+    present: bool,
+    decision: str,
+    stored_fingerprint: str,
+) -> None:
+    store: dict[tuple[object, ...], AgentToolExecution] = {}
+    sessions: list[FakeSession] = []
+    tool_calls = 0
+    user_id = uuid4()
+
+    def session_factory() -> Session:
+        session = FakeSession()
+        sessions.append(session)
+        return cast(Session, session)
+
+    def dispatcher(*args: object, **kwargs: object) -> AgentToolMutationResult:
+        nonlocal tool_calls
+        tool_calls += 1
+        raise AssertionError("domain dispatcher must not run")
+
+    coordinator = AgentToolExecutionCoordinator(
+        run_id=uuid4(),
+        user_id=user_id,
+        gateway=cast(AgentToolGateway, object()),
+        session_factory=session_factory,
+        repository_factory=lambda session: MemoryRepository(session, store),
+        approval_repository_factory=_approval_factory(
+            decision=decision,
+            fingerprint=stored_fingerprint,
+            present=present,
+        ),
+        dispatcher=dispatcher,
+    )
+
+    with pytest.raises(AgentToolReconciliationRequiredError):
+        coordinator(
+            _high_impact_action(),
+            revision=1,
+            proposal_fingerprint="e" * 64,
+            runtime_context=AgentRuntimeContext(
+                user_id=user_id, write_tools_enabled=True
+            ),
+        )
+
+    assert tool_calls == 0
+    assert store == {}
+    assert len(sessions) == 1
+    assert sessions[0].rollbacks == 1
+    assert sessions[0].closed is True
+
+
+def test_high_impact_write_disabled_fails_before_session_claim_or_domain() -> None:
+    sessions: list[FakeSession] = []
+    tool_calls = 0
+    user_id = uuid4()
+
+    def session_factory() -> Session:
+        session = FakeSession()
+        sessions.append(session)
+        return cast(Session, session)
+
+    def dispatcher(*args: object, **kwargs: object) -> AgentToolMutationResult:
+        nonlocal tool_calls
+        tool_calls += 1
+        raise AssertionError("domain dispatcher must not run")
+
+    coordinator = AgentToolExecutionCoordinator(
+        run_id=uuid4(),
+        user_id=user_id,
+        gateway=cast(AgentToolGateway, object()),
+        session_factory=session_factory,
+        dispatcher=dispatcher,
+    )
+
+    with pytest.raises(AgentToolReconciliationRequiredError):
+        coordinator(
+            _high_impact_action(),
+            revision=1,
+            proposal_fingerprint="e" * 64,
+            runtime_context=AgentRuntimeContext(user_id=user_id),
+        )
+
+    assert sessions == []
+    assert tool_calls == 0

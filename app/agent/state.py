@@ -17,6 +17,7 @@ from pydantic import (
 
 from app.agent.metrics import AgentRunMetrics
 from app.agent.schemas import PlanningGoal, PlanningResult
+from app.schemas.agent_tool import AgentToolMutationResult
 from app.schemas.project import ProjectListResponse
 from app.schemas.task import PublicTask, TaskListResponse
 
@@ -62,6 +63,8 @@ class AgentContextKind(StrEnum):
 class AgentWriteToolName(StrEnum):
     CREATE_TASK = "create_task"
     UPDATE_TASK = "update_task"
+    BATCH_CREATE_TASKS = "batch_create_tasks"
+    DELETE_TASK = "delete_task"
 
 
 class AgentApprovalDecision(StrEnum):
@@ -212,7 +215,7 @@ class AgentActionExecutionRecord(_FrozenContract):
     action_key: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
     tool_name: AgentWriteToolName
     outcome: AgentExecutionOutcome
-    result: PublicTask | None = None
+    result: PublicTask | AgentToolMutationResult | None = None
     error_code: str | None = Field(
         default=None,
         pattern=r"^[A-Z][A-Z0-9_]{0,63}$",

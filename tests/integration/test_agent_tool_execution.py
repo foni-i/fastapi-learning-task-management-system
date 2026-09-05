@@ -29,6 +29,7 @@ from app.models import (
     User,
 )
 from app.repositories.agent_tool_executions import AgentToolExecutionRepository
+from app.schemas.task import PublicTask
 from app.services.agent_domain import AgentDomainGateway
 from app.services.agent_tool_executions import AgentToolExecutionCoordinator
 from tests.integration.conftest import validate_migration_test_target
@@ -243,6 +244,7 @@ def test_two_session_claim_race_writes_once_and_completed_replay_calls_no_tool(
             proposal_fingerprint="e" * 64,
             runtime_context=context,
         )
+        assert isinstance(replay, PublicTask)
         assert replay.title == "Created exactly once"
         assert tool_calls == 1
 
@@ -266,6 +268,7 @@ def test_two_session_claim_race_writes_once_and_completed_replay_calls_no_tool(
             )
             assert len(executions) == 1
             assert executions[0].status == "COMPLETED"
+            assert isinstance(replay, PublicTask)
             assert executions[0].result_task_id == replay.id
             assert not hasattr(executions[0], "arguments")
     finally:

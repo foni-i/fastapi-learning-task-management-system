@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import Never, Protocol, TypedDict
 
 from app.agent.context import AgentRuntimeContext
+from app.agent.policy import is_high_impact_tool
 from app.agent.state import (
     AgentActionExecutionRecord,
     AgentApprovalDecision,
@@ -16,8 +17,10 @@ from app.agent.state import (
 from app.agent.tools import (
     AgentToolGateway,
     AgentToolResult,
+    AgentWriteToolResult,
     execute_tool,
     validate_tool_arguments,
+    validate_write_tool_result,
 )
 from app.core.exceptions import (
     ArchivedProjectError,
@@ -26,7 +29,6 @@ from app.core.exceptions import (
     TaskNotFoundError,
     TaskTransitionError,
 )
-from app.schemas.task import PublicTask
 
 AGENT_EXECUTION_NOT_AUTHORIZED_MESSAGE = "Agent actions are not authorized"
 AGENT_ACTION_FAILED = "AGENT_ACTION_FAILED"
@@ -67,7 +69,7 @@ class IdempotentActionExecutor(Protocol):
         revision: int,
         proposal_fingerprint: str,
         runtime_context: AgentRuntimeContext,
-    ) -> PublicTask: ...
+    ) -> AgentWriteToolResult: ...
 
 
 class AgentExecutionUpdate(TypedDict):
@@ -125,6 +127,8 @@ def execute_tasks(
                 action.arguments,
                 runtime_context,
             )
+            if is_high_impact_tool(action.tool_name.value) and action_executor is None:
+                _fail_not_authorized()
     except Exception:
         _fail_not_authorized()
 
@@ -150,7 +154,10 @@ def execute_tasks(
                     proposal_fingerprint=fingerprint_plan_proposal(proposal),
                     runtime_context=runtime_context,
                 )
-            public_result = PublicTask.model_validate(result)
+            public_result = validate_write_tool_result(
+                action.tool_name.value,
+                result,
+            )
             records.append(
                 AgentActionExecutionRecord(
                     action_key=action.action_key,

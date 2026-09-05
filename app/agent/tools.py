@@ -1,7 +1,7 @@
 """Strict allowlisted Agent tools over the Domain Service gateway."""
 
 from collections.abc import Mapping
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID
 
 from pydantic import (
@@ -13,7 +13,9 @@ from pydantic import (
 )
 
 from app.agent.context import AgentRuntimeContext
+from app.agent.policy import HIGH_IMPACT_TOOL_NAMES
 from app.agent.providers import ProviderToolDefinition
+from app.schemas.agent_tool import AgentToolMutationResult
 from app.schemas.project import ProjectListResponse
 from app.schemas.task import (
     TASK_UPDATE_EMPTY_MESSAGE,
@@ -85,12 +87,39 @@ class UpdateTaskToolArguments(TaskUpdate):
         return TaskUpdate.model_validate(values)
 
 
-type AgentToolResult = ProjectListResponse | TaskListResponse | PublicTask
+class BatchCreateTasksToolArguments(BaseModel):
+    """Accept one bounded batch whose strict Task inputs share one Project."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    tasks: tuple[TaskCreate, ...] = Field(min_length=1, max_length=10)
+
+    @model_validator(mode="after")
+    def require_one_project(self) -> BatchCreateTasksToolArguments:
+        if len({task.project_id for task in self.tasks}) != 1:
+            raise ValueError("Batch tasks must belong to one project")
+        return self
+
+
+class DeleteTaskToolArguments(BaseModel):
+    """Accept only the owner-scoped Task locator for deletion."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    task_id: UUID
+
+
+type AgentToolResult = (
+    ProjectListResponse | TaskListResponse | PublicTask | AgentToolMutationResult
+)
+type AgentWriteToolResult = PublicTask | AgentToolMutationResult
 type AgentToolArguments = (
     ListProjectsToolArguments
     | ListTasksToolArguments
     | CreateTaskToolArguments
     | UpdateTaskToolArguments
+    | BatchCreateTasksToolArguments
+    | DeleteTaskToolArguments
 )
 
 
@@ -129,6 +158,24 @@ class AgentToolGateway(Protocol):
     ) -> PublicTask: ...
 
 
+class HighImpactAgentToolGateway(Protocol):
+    """Expose destructive capabilities only at their guarded dispatch branch."""
+
+    def batch_create_tasks(
+        self,
+        *,
+        user_id: UUID,
+        task_inputs: tuple[TaskCreate, ...],
+    ) -> AgentToolMutationResult: ...
+
+    def delete_task(
+        self,
+        *,
+        user_id: UUID,
+        task_id: UUID,
+    ) -> AgentToolMutationResult: ...
+
+
 READ_TOOL_NAMES = ("list_projects", "list_tasks")
 
 READ_TOOL_DEFINITIONS = (
@@ -146,7 +193,9 @@ READ_TOOL_DEFINITIONS = (
     ),
 )
 
-WRITE_TOOL_NAMES = ("create_task", "update_task")
+STANDARD_WRITE_TOOL_NAMES = ("create_task", "update_task")
+HIGH_IMPACT_WRITE_TOOL_NAMES = tuple(sorted(HIGH_IMPACT_TOOL_NAMES))
+WRITE_TOOL_NAMES = STANDARD_WRITE_TOOL_NAMES + HIGH_IMPACT_WRITE_TOOL_NAMES
 TOOL_NAMES = READ_TOOL_NAMES + WRITE_TOOL_NAMES
 
 WRITE_TOOL_DEFINITIONS = (
@@ -159,6 +208,18 @@ WRITE_TOOL_DEFINITIONS = (
         name="update_task",
         description="Update editable fields on a task owned by the authenticated user.",
         input_schema=UpdateTaskToolArguments.model_json_schema(),
+    ),
+    ProviderToolDefinition(
+        name="batch_create_tasks",
+        description=(
+            "Atomically create one to ten tasks in one authenticated-user project."
+        ),
+        input_schema=BatchCreateTasksToolArguments.model_json_schema(),
+    ),
+    ProviderToolDefinition(
+        name="delete_task",
+        description="Delete one task owned by the authenticated user.",
+        input_schema=DeleteTaskToolArguments.model_json_schema(),
     ),
 )
 
@@ -201,11 +262,39 @@ def execute_tool(
             user_id=context.user_id,
             task_input=TaskCreate.model_validate(validated.model_dump()),
         )
-    return runtime_gateway.update_task(
+    if isinstance(validated, UpdateTaskToolArguments):
+        return runtime_gateway.update_task(
+            user_id=context.user_id,
+            task_id=validated.task_id,
+            task_update=validated.to_task_update(),
+        )
+    if isinstance(validated, BatchCreateTasksToolArguments):
+        high_impact_gateway = cast(HighImpactAgentToolGateway, runtime_gateway)
+        return high_impact_gateway.batch_create_tasks(
+            user_id=context.user_id,
+            task_inputs=validated.tasks,
+        )
+    high_impact_gateway = cast(HighImpactAgentToolGateway, runtime_gateway)
+    return high_impact_gateway.delete_task(
         user_id=context.user_id,
         task_id=validated.task_id,
-        task_update=validated.to_task_update(),
     )
+
+
+def validate_write_tool_result(
+    name: str,
+    result: AgentToolResult,
+) -> AgentWriteToolResult:
+    """Apply the exact public result contract for one write capability."""
+
+    if name in STANDARD_WRITE_TOOL_NAMES:
+        return PublicTask.model_validate(result)
+    if name in HIGH_IMPACT_WRITE_TOOL_NAMES:
+        mutation = AgentToolMutationResult.model_validate(result)
+        if mutation.operation != name:
+            raise ValueError("Agent Tool result does not match its capability")
+        return mutation
+    raise AgentToolNotAllowedError(AGENT_TOOL_NOT_ALLOWED_MESSAGE)
 
 
 def validate_tool_arguments(
@@ -228,8 +317,12 @@ def validate_tool_arguments(
             validated = ListTasksToolArguments.model_validate(arguments)
         elif name == "create_task":
             validated = CreateTaskToolArguments.model_validate(arguments)
-        else:
+        elif name == "update_task":
             validated = UpdateTaskToolArguments.model_validate(arguments)
+        elif name == "batch_create_tasks":
+            validated = BatchCreateTasksToolArguments.model_validate(arguments)
+        else:
+            validated = DeleteTaskToolArguments.model_validate(arguments)
     except ValidationError:
         raise AgentToolInputError(AGENT_TOOL_INPUT_MESSAGE) from None
     return validated

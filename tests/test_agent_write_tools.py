@@ -117,6 +117,8 @@ def test_write_enabled_allowlist_is_exact_and_read_only_context_hides_writes() -
         "list_tasks",
         "create_task",
         "update_task",
+        "batch_create_tasks",
+        "delete_task",
     )
 
 

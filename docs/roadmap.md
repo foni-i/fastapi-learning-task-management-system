@@ -4219,7 +4219,9 @@ or final recovery tests.
 
 ### Task 10.6 — Mandatory approval for batch creation, deletion, and high impact
 
-**Estimated time:** 1–2 focused hours. **Migration/new dependency:** none.
+**Estimated time:** 1–2 focused hours. **Migration:** one corrective revision
+widens only `ck_agent_tool_executions_tool_name` for the two new capabilities.
+**New dependency:** none.
 **Real PostgreSQL:** optional only when a focused transaction/ownership defect is
 found; ordinary acceptance uses service/tool fakes.
 
@@ -4236,7 +4238,9 @@ execution policy modules or add one narrow `app/agent/policy.py`, and
 `tests/test_agent_high_impact_policy.py` and update relevant Tool, planning,
 approval, execution, and graph tests. Add a dedicated Domain Service operation
 for bounded batch creation only if no existing service can own one atomic batch
-transaction without weakening current layering.
+transaction without weakening current layering. Add one reversible migration that
+replaces only the existing Tool-name check constraint; do not edit Task 10.5's
+accepted migration.
 
 **Implementation scope:** Add only the explicitly named `batch_create_tasks` and
 `delete_task` capabilities. Batch input contains one to at most ten strict

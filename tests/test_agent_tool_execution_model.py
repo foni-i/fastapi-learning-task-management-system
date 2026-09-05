@@ -56,6 +56,14 @@ def test_execution_storage_has_exact_safe_columns_and_identity_constraint() -> N
     }
     assert "UNKNOWN" in checks["ck_agent_tool_executions_status"]
     assert "result_task_id" in checks["ck_agent_tool_executions_state"]
+    tool_names = checks["ck_agent_tool_executions_tool_name"]
+    for name in (
+        "create_task",
+        "update_task",
+        "batch_create_tasks",
+        "delete_task",
+    ):
+        assert name in tool_names
     for name in ("started_at", "completed_at", "created_at", "updated_at"):
         assert isinstance(table.c[name].type, DateTime)
         assert cast(DateTime, table.c[name].type).timezone is True

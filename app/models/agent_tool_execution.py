@@ -58,7 +58,8 @@ class AgentToolExecution(Base):
             name="ck_agent_tool_executions_action_key",
         ),
         CheckConstraint(
-            "tool_name IN ('create_task', 'update_task')",
+            "tool_name IN ('create_task', 'update_task', "
+            "'batch_create_tasks', 'delete_task')",
             name="ck_agent_tool_executions_tool_name",
         ),
         CheckConstraint(

@@ -41,6 +41,7 @@ PROJECT_REVISION = "4d8c7a1b2e90"
 TASK_REVISION = "6e2f9a4c1b73"
 AGENT_RECORD_REVISION = "21ec26a7c672"
 AGENT_TOOL_EXECUTION_REVISION = "8b7d4e2f1a90"
+AGENT_TOOL_NAME_REVISION = "c4d8a1f6e205"
 DATABASE_PASSWORD = "test-only-password"
 VALID_DATABASE_URL = (
     f"postgresql+psycopg://test_user:{DATABASE_PASSWORD}@127.0.0.1:5432/test_database"
@@ -102,23 +103,25 @@ def test_alembic_configuration_loads_linear_product_migration_chain() -> None:
     assert Path(script_directory.dir).resolve() == ALEMBIC_DIRECTORY.resolve()
     assert ALEMBIC_VERSIONS_DIRECTORY.is_dir()
     revisions = list(script_directory.walk_revisions())
-    assert len(list(ALEMBIC_VERSIONS_DIRECTORY.glob("*.py"))) == 7
-    assert script_directory.get_heads() == [AGENT_TOOL_EXECUTION_REVISION]
-    assert len(revisions) == 7
-    assert revisions[0].revision == AGENT_TOOL_EXECUTION_REVISION
-    assert revisions[0].down_revision == AGENT_RECORD_REVISION
-    assert revisions[1].revision == AGENT_RECORD_REVISION
-    assert revisions[1].down_revision == TASK_REVISION
-    assert revisions[2].revision == TASK_REVISION
-    assert revisions[2].down_revision == PROJECT_REVISION
-    assert revisions[3].revision == PROJECT_REVISION
-    assert revisions[3].down_revision == EMAIL_UNIQUE_REVISION
-    assert revisions[4].revision == EMAIL_UNIQUE_REVISION
-    assert revisions[4].down_revision == USER_REVISION
-    assert revisions[5].revision == USER_REVISION
-    assert revisions[5].down_revision == BASELINE_REVISION
-    assert revisions[6].revision == BASELINE_REVISION
-    assert revisions[6].down_revision is None
+    assert len(list(ALEMBIC_VERSIONS_DIRECTORY.glob("*.py"))) == 8
+    assert script_directory.get_heads() == [AGENT_TOOL_NAME_REVISION]
+    assert len(revisions) == 8
+    assert revisions[0].revision == AGENT_TOOL_NAME_REVISION
+    assert revisions[0].down_revision == AGENT_TOOL_EXECUTION_REVISION
+    assert revisions[1].revision == AGENT_TOOL_EXECUTION_REVISION
+    assert revisions[1].down_revision == AGENT_RECORD_REVISION
+    assert revisions[2].revision == AGENT_RECORD_REVISION
+    assert revisions[2].down_revision == TASK_REVISION
+    assert revisions[3].revision == TASK_REVISION
+    assert revisions[3].down_revision == PROJECT_REVISION
+    assert revisions[4].revision == PROJECT_REVISION
+    assert revisions[4].down_revision == EMAIL_UNIQUE_REVISION
+    assert revisions[5].revision == EMAIL_UNIQUE_REVISION
+    assert revisions[5].down_revision == USER_REVISION
+    assert revisions[6].revision == USER_REVISION
+    assert revisions[6].down_revision == BASELINE_REVISION
+    assert revisions[7].revision == BASELINE_REVISION
+    assert revisions[7].down_revision is None
 
 
 def test_alembic_config_contains_no_database_url_or_password() -> None:

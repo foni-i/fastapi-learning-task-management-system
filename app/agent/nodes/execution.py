@@ -9,6 +9,7 @@ from app.agent.state import (
     AgentApprovalDecision,
     AgentExecutionOutcome,
     AgentGraphState,
+    AgentProposedAction,
     AgentValidationStatus,
     fingerprint_plan_proposal,
 )
@@ -56,6 +57,19 @@ class ToolDispatcher(Protocol):
     ) -> AgentToolResult: ...
 
 
+class IdempotentActionExecutor(Protocol):
+    """Execute one approved action through a durable idempotency boundary."""
+
+    def __call__(
+        self,
+        action: AgentProposedAction,
+        *,
+        revision: int,
+        proposal_fingerprint: str,
+        runtime_context: AgentRuntimeContext,
+    ) -> PublicTask: ...
+
+
 class AgentExecutionUpdate(TypedDict):
     execution_records: tuple[AgentActionExecutionRecord, ...]
 
@@ -94,6 +108,7 @@ def execute_tasks(
     runtime_context: AgentRuntimeContext,
     dispatcher: ToolDispatcher = execute_tool,
     gateway: AgentToolGateway | None = None,
+    action_executor: IdempotentActionExecutor | None = None,
 ) -> AgentExecutionUpdate:
     """Execute each approved write once, stopping after the first failure."""
 
@@ -121,12 +136,20 @@ def execute_tasks(
                 action.arguments,
                 runtime_context,
             )
-            result = dispatcher(
-                action.tool_name.value,
-                action.arguments,
-                runtime_context,
-                gateway=gateway,
-            )
+            if action_executor is None:
+                result = dispatcher(
+                    action.tool_name.value,
+                    action.arguments,
+                    runtime_context,
+                    gateway=gateway,
+                )
+            else:
+                result = action_executor(
+                    action,
+                    revision=state.revision_count,
+                    proposal_fingerprint=fingerprint_plan_proposal(proposal),
+                    runtime_context=runtime_context,
+                )
             public_result = PublicTask.model_validate(result)
             records.append(
                 AgentActionExecutionRecord(

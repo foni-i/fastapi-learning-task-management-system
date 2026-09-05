@@ -40,6 +40,7 @@ def test_project_registers_in_shared_metadata_with_exact_columns() -> None:
         "agent_threads",
         "agent_runs",
         "agent_approvals",
+        "agent_tool_executions",
     }
     assert set(Project.__table__.columns.keys()) == EXPECTED_COLUMNS
 

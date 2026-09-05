@@ -19,7 +19,15 @@ from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import DatabaseConfigurationError
 from app.main import create_app
-from app.models import AgentApproval, AgentRun, AgentThread, Project, Task, User
+from app.models import (
+    AgentApproval,
+    AgentRun,
+    AgentThread,
+    AgentToolExecution,
+    Project,
+    Task,
+    User,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ALEMBIC_CONFIG_PATH = PROJECT_ROOT / "alembic.ini"
@@ -32,6 +40,7 @@ EMAIL_UNIQUE_REVISION = "9f3b2d6e8a41"
 PROJECT_REVISION = "4d8c7a1b2e90"
 TASK_REVISION = "6e2f9a4c1b73"
 AGENT_RECORD_REVISION = "21ec26a7c672"
+AGENT_TOOL_EXECUTION_REVISION = "8b7d4e2f1a90"
 DATABASE_PASSWORD = "test-only-password"
 VALID_DATABASE_URL = (
     f"postgresql+psycopg://test_user:{DATABASE_PASSWORD}@127.0.0.1:5432/test_database"
@@ -93,21 +102,23 @@ def test_alembic_configuration_loads_linear_product_migration_chain() -> None:
     assert Path(script_directory.dir).resolve() == ALEMBIC_DIRECTORY.resolve()
     assert ALEMBIC_VERSIONS_DIRECTORY.is_dir()
     revisions = list(script_directory.walk_revisions())
-    assert len(list(ALEMBIC_VERSIONS_DIRECTORY.glob("*.py"))) == 6
-    assert script_directory.get_heads() == [AGENT_RECORD_REVISION]
-    assert len(revisions) == 6
-    assert revisions[0].revision == AGENT_RECORD_REVISION
-    assert revisions[0].down_revision == TASK_REVISION
-    assert revisions[1].revision == TASK_REVISION
-    assert revisions[1].down_revision == PROJECT_REVISION
-    assert revisions[2].revision == PROJECT_REVISION
-    assert revisions[2].down_revision == EMAIL_UNIQUE_REVISION
-    assert revisions[3].revision == EMAIL_UNIQUE_REVISION
-    assert revisions[3].down_revision == USER_REVISION
-    assert revisions[4].revision == USER_REVISION
-    assert revisions[4].down_revision == BASELINE_REVISION
-    assert revisions[5].revision == BASELINE_REVISION
-    assert revisions[5].down_revision is None
+    assert len(list(ALEMBIC_VERSIONS_DIRECTORY.glob("*.py"))) == 7
+    assert script_directory.get_heads() == [AGENT_TOOL_EXECUTION_REVISION]
+    assert len(revisions) == 7
+    assert revisions[0].revision == AGENT_TOOL_EXECUTION_REVISION
+    assert revisions[0].down_revision == AGENT_RECORD_REVISION
+    assert revisions[1].revision == AGENT_RECORD_REVISION
+    assert revisions[1].down_revision == TASK_REVISION
+    assert revisions[2].revision == TASK_REVISION
+    assert revisions[2].down_revision == PROJECT_REVISION
+    assert revisions[3].revision == PROJECT_REVISION
+    assert revisions[3].down_revision == EMAIL_UNIQUE_REVISION
+    assert revisions[4].revision == EMAIL_UNIQUE_REVISION
+    assert revisions[4].down_revision == USER_REVISION
+    assert revisions[5].revision == USER_REVISION
+    assert revisions[5].down_revision == BASELINE_REVISION
+    assert revisions[6].revision == BASELINE_REVISION
+    assert revisions[6].down_revision is None
 
 
 def test_alembic_config_contains_no_database_url_or_password() -> None:
@@ -148,6 +159,7 @@ def test_offline_environment_uses_settings_and_base_metadata(
     assert captured_configuration["target_metadata"] is AgentThread.metadata
     assert captured_configuration["target_metadata"] is AgentRun.metadata
     assert captured_configuration["target_metadata"] is AgentApproval.metadata
+    assert captured_configuration["target_metadata"] is AgentToolExecution.metadata
     assert set(Base.metadata.tables) == {
         "users",
         "projects",
@@ -155,6 +167,7 @@ def test_offline_environment_uses_settings_and_base_metadata(
         "agent_threads",
         "agent_runs",
         "agent_approvals",
+        "agent_tool_executions",
     }
 
 

@@ -23,6 +23,7 @@ def test_user_remains_registered_in_shared_product_metadata() -> None:
         "agent_threads",
         "agent_runs",
         "agent_approvals",
+        "agent_tool_executions",
     }
     assert set(User.__table__.columns.keys()) == EXPECTED_COLUMNS
 

@@ -16,6 +16,7 @@ PRODUCT_TABLES = {
     "agent_threads",
     "agent_runs",
     "agent_approvals",
+    "agent_tool_executions",
 }
 
 

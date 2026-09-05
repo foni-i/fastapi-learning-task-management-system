@@ -8,6 +8,10 @@ from app.models.agent_run import (
     AgentThread,
     AgentThreadStatus,
 )
+from app.models.agent_tool_execution import (
+    AgentToolExecution,
+    AgentToolExecutionStatus,
+)
 from app.models.project import Project, ProjectStatus
 from app.models.task import Task, TaskPriority, TaskStatus
 from app.models.user import User
@@ -19,6 +23,8 @@ __all__ = [
     "AgentRunStatus",
     "AgentThread",
     "AgentThreadStatus",
+    "AgentToolExecution",
+    "AgentToolExecutionStatus",
     "Project",
     "ProjectStatus",
     "Task",

@@ -41,6 +41,7 @@ from app.schemas.agent_run import (
     PublicAgentThread,
 )
 from app.services.agent_domain import AgentDomainGateway
+from app.services.agent_tool_executions import AgentToolExecutionCoordinator
 
 RepositoryFactory = Callable[[Session], AgentRunRepository]
 IdFactory = Callable[[], UUID]
@@ -58,7 +59,11 @@ def utc_now() -> datetime:
 
 
 @contextmanager
-def open_runtime_workflow(user_id: UUID) -> Iterator[AgentWorkflow]:
+def open_runtime_workflow(
+    user_id: UUID,
+    *,
+    run_id: UUID | None = None,
+) -> Iterator[AgentWorkflow]:
     """Build one production workflow without exposing credentials or connections."""
 
     settings = get_settings()
@@ -69,11 +74,14 @@ def open_runtime_workflow(user_id: UUID) -> Iterator[AgentWorkflow]:
     ):
         raise AgentWorkflowUnavailableError(AGENT_WORKFLOW_UNAVAILABLE_MESSAGE)
     try:
+        if run_id is None:
+            raise AgentWorkflowUnavailableError(AGENT_WORKFLOW_UNAVAILABLE_MESSAGE)
         with open_postgres_checkpointer() as checkpointer:
+            gateway = AgentDomainGateway()
             yield build_agent_graph(
                 model=settings.model_name,
                 provider=OpenAIProvider(api_key=settings.model_api_key),
-                gateway=AgentDomainGateway(),
+                gateway=gateway,
                 runtime_context=AgentRuntimeContext(
                     user_id=user_id,
                     write_tools_enabled=True,
@@ -83,6 +91,11 @@ def open_runtime_workflow(user_id: UUID) -> Iterator[AgentWorkflow]:
                 sleeper=sleep,
                 checkpointer=checkpointer,
                 durable_approval=True,
+                action_executor=AgentToolExecutionCoordinator(
+                    run_id=run_id,
+                    user_id=user_id,
+                    gateway=gateway,
+                ),
             )
     except AgentWorkflowUnavailableError:
         raise
@@ -90,6 +103,19 @@ def open_runtime_workflow(user_id: UUID) -> Iterator[AgentWorkflow]:
         raise AgentWorkflowUnavailableError(
             AGENT_WORKFLOW_UNAVAILABLE_MESSAGE
         ) from None
+
+
+def _open_workflow(
+    workflow_factory: WorkflowFactory,
+    *,
+    user_id: UUID,
+    run_id: UUID,
+) -> AbstractContextManager[AgentWorkflow]:
+    """Pass trusted run identity only to the production durable factory."""
+
+    if workflow_factory is open_runtime_workflow:
+        return open_runtime_workflow(user_id, run_id=run_id)
+    return workflow_factory(user_id)
 
 
 def _snapshot(
@@ -167,7 +193,11 @@ def start_agent_run(
             user_id=user_id,
             prompt_version=STUDY_PLAN_PROMPT_VERSION,
         )
-        with workflow_factory(user_id) as workflow:
+        with _open_workflow(
+            workflow_factory,
+            user_id=user_id,
+            run_id=run.id,
+        ) as workflow:
             progress = workflow.start_durable(
                 AgentGraphInput(goal=request.goal),
                 thread_id=thread.id,
@@ -262,7 +292,11 @@ def submit_agent_approval(
         raise
 
     try:
-        with workflow_factory(user_id) as workflow:
+        with _open_workflow(
+            workflow_factory,
+            user_id=user_id,
+            run_id=run.id,
+        ) as workflow:
             progress = workflow.resume_durable(
                 _internal_response(submission),
                 thread_id=thread.id,

@@ -21,7 +21,7 @@ from app.agent.nodes.approval import (
     request_approval,
 )
 from app.agent.nodes.context import analyze_goal, load_context
-from app.agent.nodes.execution import execute_tasks
+from app.agent.nodes.execution import IdempotentActionExecutor, execute_tasks
 from app.agent.nodes.finalization import summarize, verify_result
 from app.agent.nodes.planning import generate_plan, validate_plan
 from app.agent.planning import Clock, Sleeper
@@ -249,6 +249,7 @@ def build_agent_graph(
     sleeper: Sleeper,
     checkpointer: BaseCheckpointSaver[str] | None = None,
     durable_approval: bool = False,
+    action_executor: IdempotentActionExecutor | None = None,
 ) -> AgentWorkflow:
     """Compile the eight accepted nodes with host-owned runtime dependencies."""
 
@@ -304,7 +305,12 @@ def build_agent_graph(
     def execution_node(state: AgentGraphState) -> StateUpdate:
         try:
             update: StateUpdate = dict(
-                execute_tasks(state, runtime_context=runtime_context, gateway=gateway)
+                execute_tasks(
+                    state,
+                    runtime_context=runtime_context,
+                    gateway=gateway,
+                    action_executor=action_executor,
+                )
             )
             if state.metrics is not None:
                 records = update["execution_records"]

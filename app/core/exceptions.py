@@ -13,6 +13,7 @@ AGENT_THREAD_NOT_FOUND_MESSAGE = "Agent thread does not exist"
 AGENT_RUN_NOT_FOUND_MESSAGE = "Agent run does not exist"
 AGENT_RUN_CONFLICT_MESSAGE = "Agent run cannot accept this approval"
 AGENT_WORKFLOW_UNAVAILABLE_MESSAGE = "Agent workflow is temporarily unavailable"
+AGENT_TOOL_RECONCILIATION_MESSAGE = "Agent action requires reconciliation"
 
 
 class DuplicateEmailError(Exception):
@@ -69,3 +70,7 @@ class AgentRunConflictError(Exception):
 
 class AgentWorkflowUnavailableError(Exception):
     """Hide graph and checkpoint infrastructure diagnostics."""
+
+
+class AgentToolReconciliationRequiredError(Exception):
+    """Fail closed when a Tool write outcome cannot be safely repeated."""

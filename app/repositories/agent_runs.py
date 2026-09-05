@@ -141,6 +141,25 @@ class AgentRunRepository:
         )
         return self._session.scalar(statement)
 
+    def list_owned_approvals(
+        self,
+        *,
+        run_id: UUID,
+        user_id: UUID,
+    ) -> tuple[AgentApproval, ...]:
+        """Return the bounded approval history for one owned run."""
+
+        statement = (
+            select(AgentApproval)
+            .where(
+                AgentApproval.run_id == run_id,
+                AgentApproval.user_id == user_id,
+            )
+            .order_by(AgentApproval.revision.asc(), AgentApproval.id.asc())
+            .limit(3)
+        )
+        return tuple(self._session.scalars(statement))
+
     def update_run(
         self,
         run: AgentRun,

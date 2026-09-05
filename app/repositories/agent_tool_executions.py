@@ -36,6 +36,29 @@ class AgentToolExecutionRepository:
         )
         return self._session.scalar(statement)
 
+    def list_owned_run_actions(
+        self,
+        *,
+        run_id: UUID,
+        user_id: UUID,
+        limit: int,
+    ) -> tuple[AgentToolExecution, ...]:
+        """Return a deterministic bounded public-audit source for one run."""
+
+        statement = (
+            select(AgentToolExecution)
+            .where(
+                AgentToolExecution.run_id == run_id,
+                AgentToolExecution.user_id == user_id,
+            )
+            .order_by(
+                AgentToolExecution.created_at.asc(),
+                AgentToolExecution.id.asc(),
+            )
+            .limit(limit)
+        )
+        return tuple(self._session.scalars(statement))
+
     def create_claim(
         self,
         *,

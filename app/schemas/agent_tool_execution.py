@@ -19,7 +19,9 @@ class PublicAgentToolExecution(BaseModel):
     run_id: UUID
     revision: int = Field(ge=0, le=2)
     action_key: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
-    tool_name: str = Field(pattern=r"^(create_task|update_task)$")
+    tool_name: str = Field(
+        pattern=(r"^(create_task|update_task|batch_create_tasks|delete_task)$")
+    )
     status: AgentToolExecutionStatus
     attempt_count: int = Field(ge=1, le=100)
     result_task_id: UUID | None

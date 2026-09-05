@@ -98,6 +98,7 @@ def unauthenticated_agent_client(client: TestClient) -> Iterator[TestClient]:
     [
         ("post", "/api/v1/agent/runs", {"goal": {"objective": "Learn"}}),
         ("get", f"/api/v1/agent/runs/{uuid4()}", None),
+        ("get", f"/api/v1/agent/runs/{uuid4()}/events", None),
         (
             "post",
             f"/api/v1/agent/runs/{uuid4()}/approval",
@@ -247,6 +248,7 @@ def test_openapi_exposes_only_public_agent_contracts() -> None:
     paths = app.openapi()["paths"]
     assert set(paths["/api/v1/agent/runs"]) == {"post"}
     assert set(paths["/api/v1/agent/runs/{run_id}"]) == {"get"}
+    assert set(paths["/api/v1/agent/runs/{run_id}/events"]) == {"get"}
     assert set(paths["/api/v1/agent/runs/{run_id}/approval"]) == {"post"}
     assert set(paths["/api/v1/agent/runs"]["post"]["responses"]) == {
         "201",
@@ -258,6 +260,13 @@ def test_openapi_exposes_only_public_agent_contracts() -> None:
         "200",
         "401",
         "404",
+        "422",
+    }
+    assert set(paths["/api/v1/agent/runs/{run_id}/events"]["get"]["responses"]) == {
+        "200",
+        "401",
+        "404",
+        "409",
         "422",
     }
     assert set(paths["/api/v1/agent/runs/{run_id}/approval"]["post"]["responses"]) == {

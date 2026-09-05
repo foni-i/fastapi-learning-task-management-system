@@ -28,6 +28,7 @@ def test_default_application_is_importable_with_basic_metadata() -> None:
         "/api/v1/tasks/{task_id}/complete",
         "/api/v1/agent/runs",
         "/api/v1/agent/runs/{run_id}",
+        "/api/v1/agent/runs/{run_id}/events",
         "/api/v1/agent/runs/{run_id}/approval",
     }
     assert set(paths["/api/v1/auth/login"]) == {"post"}
@@ -41,6 +42,7 @@ def test_default_application_is_importable_with_basic_metadata() -> None:
     assert set(paths["/api/v1/tasks/{task_id}/complete"]) == {"post"}
     assert set(paths["/api/v1/agent/runs"]) == {"post"}
     assert set(paths["/api/v1/agent/runs/{run_id}"]) == {"get"}
+    assert set(paths["/api/v1/agent/runs/{run_id}/events"]) == {"get"}
     assert set(paths["/api/v1/agent/runs/{run_id}/approval"]) == {"post"}
 
 

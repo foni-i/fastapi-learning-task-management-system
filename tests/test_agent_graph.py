@@ -205,6 +205,7 @@ def _workflow(
     gateway: FakeGateway,
     user_id: UUID | None = None,
     checkpointer: BaseCheckpointSaver[str] | None = None,
+    durable_approval: bool = False,
 ) -> tuple[AgentWorkflow, UUID]:
     trusted_user_id = user_id or uuid4()
     workflow = build_agent_graph(
@@ -219,6 +220,7 @@ def _workflow(
         clock=lambda: 1.0,
         sleeper=lambda _: None,
         checkpointer=checkpointer,
+        durable_approval=durable_approval,
     )
     return workflow, trusted_user_id
 
@@ -564,3 +566,86 @@ def test_offline_graph_stays_compatible_without_thread_configuration() -> None:
     output = workflow.invoke(AgentGraphInput(goal=PlanningGoal(objective="Learn")))
 
     assert output.status is AgentTerminalStatus.SUCCEEDED
+
+
+def test_durable_graph_interrupts_with_safe_exact_approval_payload() -> None:
+    workflow, user_id = _workflow(
+        provider=CapturingProvider([_proposal_response(action_count=1)]),
+        approver=SequenceApprover([]),
+        gateway=FakeGateway(),
+        checkpointer=InMemorySaver(),
+        durable_approval=True,
+    )
+
+    progress = workflow.start_durable(
+        AgentGraphInput(goal=PlanningGoal(objective="Create a task")),
+        thread_id=uuid4(),
+    )
+
+    assert progress.output is None
+    assert progress.approval is not None
+    assert set(progress.approval.model_dump()) == {
+        "plan_summary",
+        "action_names",
+        "action_count",
+        "revision",
+        "proposal_fingerprint",
+    }
+    serialized = progress.approval.model_dump_json().lower()
+    assert str(user_id) not in serialized
+    for forbidden in ("user_id", "arguments", "checkpoint", "reasoning", "token"):
+        assert forbidden not in serialized
+
+
+def test_durable_approve_resumes_to_execution_and_reject_has_no_write() -> None:
+    for decision, expected in (
+        (_approve(), AgentTerminalStatus.SUCCEEDED),
+        (_reject(), AgentTerminalStatus.REJECTED),
+    ):
+        gateway = FakeGateway(write_outcomes=[_task()])
+        workflow, _ = _workflow(
+            provider=CapturingProvider([_proposal_response(action_count=1)]),
+            approver=SequenceApprover([]),
+            gateway=gateway,
+            checkpointer=InMemorySaver(),
+            durable_approval=True,
+        )
+        thread_id = uuid4()
+        workflow.start_durable(
+            AgentGraphInput(goal=PlanningGoal(objective="Create a task")),
+            thread_id=thread_id,
+        )
+
+        completed = workflow.resume_durable(decision, thread_id=thread_id)
+
+        assert completed.output is not None
+        assert completed.output.status is expected
+        writes = [name for name, _ in gateway.calls if name == "create_task"]
+        assert len(writes) == (
+            1 if decision.decision is AgentApprovalDecision.APPROVED else 0
+        )
+
+
+def test_durable_request_changes_creates_a_fresh_interrupt_revision() -> None:
+    workflow, _ = _workflow(
+        provider=CapturingProvider(
+            [_proposal_response(summary="First"), _proposal_response(summary="Second")]
+        ),
+        approver=SequenceApprover([]),
+        gateway=FakeGateway(),
+        checkpointer=InMemorySaver(),
+        durable_approval=True,
+    )
+    thread_id = uuid4()
+    first = workflow.start_durable(
+        AgentGraphInput(goal=PlanningGoal(objective="Revise a plan")),
+        thread_id=thread_id,
+    )
+
+    second = workflow.resume_durable(_change("Make it shorter"), thread_id=thread_id)
+
+    assert first.approval is not None
+    assert second.approval is not None
+    assert first.approval.revision == 0
+    assert second.approval.revision == 1
+    assert first.approval.proposal_fingerprint != second.approval.proposal_fingerprint

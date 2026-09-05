@@ -7,6 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.agent.schemas import PlanningGoal
 from app.models.agent_run import (
     AgentApprovalStatus,
     AgentRunStatus,
@@ -58,6 +59,46 @@ class AgentThreadCreate(_StrictContract):
     @classmethod
     def normalize_goal_summary(cls, value: object) -> object:
         return _trim(value)
+
+
+class AgentRunStartRequest(_StrictContract):
+    """Accept one bounded goal without client-selected runtime identity."""
+
+    goal: PlanningGoal
+
+
+class AgentApprovalSubmissionDecision(StrEnum):
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    REQUEST_CHANGES = "REQUEST_CHANGES"
+
+
+class AgentApprovalSubmission(_StrictContract):
+    """Bind one human decision to an exact pending proposal revision."""
+
+    revision: int = Field(ge=0, le=2)
+    proposal_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    decision: AgentApprovalSubmissionDecision
+    feedback: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("feedback", mode="before")
+    @classmethod
+    def normalize_feedback(cls, value: object) -> object:
+        if value is None or not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Approval feedback must not be blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def require_feedback_contract(self) -> Self:
+        if self.decision is AgentApprovalSubmissionDecision.REQUEST_CHANGES:
+            if self.feedback is None:
+                raise ValueError("Requested changes require feedback")
+        elif self.feedback is not None:
+            raise ValueError("Feedback is only allowed for requested changes")
+        return self
 
 
 class AgentRunMetricsSnapshot(_StrictContract):
@@ -214,3 +255,17 @@ class PublicAgentApproval(_PublicRecord):
         elif self.feedback is not None:
             raise ValueError("Only requested changes can contain feedback")
         return self
+
+
+class AgentRunSnapshot(_StrictContract):
+    """Expose only product records needed to observe one Agent run."""
+
+    thread: PublicAgentThread
+    run: PublicAgentRun
+    approval: PublicAgentApproval | None = None
+
+
+class AgentRunErrorResponse(_StrictContract):
+    """Document one fixed safe Agent HTTP error without diagnostics."""
+
+    detail: str

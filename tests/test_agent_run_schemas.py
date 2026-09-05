@@ -9,7 +9,12 @@ from pydantic import ValidationError
 
 from app.models.agent_run import AgentApprovalStatus, AgentRunStatus, AgentThreadStatus
 from app.schemas.agent_run import (
+    AgentApprovalSubmission,
+    AgentApprovalSubmissionDecision,
     AgentRunMetricsSnapshot,
+    AgentRunNode,
+    AgentRunSnapshot,
+    AgentRunStartRequest,
     AgentThreadCreate,
     AgentThreadRunResult,
     PublicAgentApproval,
@@ -31,6 +36,70 @@ def test_thread_create_is_strict_bounded_and_trimmed() -> None:
     ):
         with pytest.raises(ValidationError):
             AgentThreadCreate.model_validate(payload)
+
+
+def test_run_start_accepts_only_a_strict_goal_without_identity() -> None:
+    request = AgentRunStartRequest.model_validate(
+        {"goal": {"objective": "  Learn recovery  "}}
+    )
+    assert request.goal.objective == "Learn recovery"
+    for forbidden in ("user_id", "thread_id", "run_id", "checkpoint_id"):
+        with pytest.raises(ValidationError):
+            AgentRunStartRequest.model_validate(
+                {"goal": {"objective": "Learn"}, forbidden: str(uuid4())}
+            )
+
+
+def test_approval_submission_is_strict_and_normalizes_change_feedback() -> None:
+    changed = AgentApprovalSubmission(
+        revision=1,
+        proposal_fingerprint="a" * 64,
+        decision=AgentApprovalSubmissionDecision.REQUEST_CHANGES,
+        feedback="  Make it smaller  ",
+    )
+    assert changed.feedback == "Make it smaller"
+    for decision in (
+        AgentApprovalSubmissionDecision.APPROVED,
+        AgentApprovalSubmissionDecision.REJECTED,
+    ):
+        accepted = AgentApprovalSubmission(
+            revision=0,
+            proposal_fingerprint="b" * 64,
+            decision=decision,
+        )
+        assert accepted.feedback is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"revision": 0, "proposal_fingerprint": "a" * 64, "decision": "PENDING"},
+        {"revision": 3, "proposal_fingerprint": "a" * 64, "decision": "APPROVED"},
+        {"revision": 0, "proposal_fingerprint": "bad", "decision": "APPROVED"},
+        {
+            "revision": 0,
+            "proposal_fingerprint": "a" * 64,
+            "decision": "APPROVED",
+            "feedback": "forbidden",
+        },
+        {
+            "revision": 0,
+            "proposal_fingerprint": "a" * 64,
+            "decision": "REQUEST_CHANGES",
+        },
+        {
+            "revision": 0,
+            "proposal_fingerprint": "a" * 64,
+            "decision": "REJECTED",
+            "user_id": str(uuid4()),
+        },
+    ],
+)
+def test_approval_submission_rejects_stale_or_internal_shapes(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        AgentApprovalSubmission.model_validate(payload)
 
 
 def test_metrics_are_explicit_nonnegative_and_consistent() -> None:
@@ -168,6 +237,34 @@ def test_thread_run_result_is_strict_and_contains_only_public_records() -> None:
         AgentThreadRunResult.model_validate(
             {"thread": thread, "run": run, "user_id": str(uuid4())}
         )
+
+
+def test_run_snapshot_contains_only_public_product_records() -> None:
+    thread_id = uuid4()
+    thread = PublicAgentThread(
+        id=thread_id,
+        goal_summary="Goal",
+        status=AgentThreadStatus.ACTIVE,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    run = PublicAgentRun(
+        id=uuid4(),
+        thread_id=thread_id,
+        status=AgentRunStatus.PENDING_APPROVAL,
+        current_node=AgentRunNode.REQUEST_APPROVAL,
+        summary=None,
+        error_code=None,
+        prompt_version="study-plan.v1",
+        metrics=AgentRunMetricsSnapshot(),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    snapshot = AgentRunSnapshot(thread=thread, run=run)
+    assert set(snapshot.model_dump()) == {"thread", "run", "approval"}
+    serialized = snapshot.model_dump_json().lower()
+    for forbidden in ("user_id", "checkpoint", "arguments", "raw_prompt", "reasoning"):
+        assert forbidden not in serialized
 
 
 @pytest.mark.parametrize("field", ["created_at", "updated_at"])

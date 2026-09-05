@@ -2,6 +2,7 @@
 
 from typing import Never, Protocol, Self, TypedDict
 
+from langgraph.types import interrupt
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.agent.state import (
@@ -48,6 +49,12 @@ class AgentApprovalRequest(_ApprovalContract):
         if self.action_count != len(self.action_names):
             raise ValueError("Approval action count is inconsistent")
         return self
+
+
+class AgentApprovalInterrupt(AgentApprovalRequest):
+    """Expose one exact validated proposal at the durable human boundary."""
+
+    proposal_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class AgentApprovalResponse(_ApprovalContract):
@@ -128,15 +135,7 @@ def request_approval(
 ) -> AgentApprovalUpdate:
     """Request an explicit decision for exactly the current validated proposal."""
 
-    fingerprint = _current_validated_fingerprint(state)
-    proposal = state.proposal
-    assert proposal is not None
-    request = AgentApprovalRequest(
-        plan_summary=proposal.planning_result.plan.summary,
-        action_names=tuple(action.tool_name for action in proposal.actions),
-        action_count=len(proposal.actions),
-        revision=state.revision_count,
-    )
+    request, fingerprint = _build_approval_request(state)
     try:
         response = AgentApprovalResponse.model_validate(decider.decide(request))
     except Exception as exc:
@@ -145,7 +144,30 @@ def request_approval(
         raise AgentApprovalUnavailableError(
             AGENT_APPROVAL_UNAVAILABLE_MESSAGE
         ) from None
+    return _apply_approval_response(state, response, fingerprint)
 
+
+def _build_approval_request(
+    state: AgentGraphState,
+) -> tuple[AgentApprovalInterrupt, str]:
+    fingerprint = _current_validated_fingerprint(state)
+    proposal = state.proposal
+    assert proposal is not None
+    request = AgentApprovalInterrupt(
+        plan_summary=proposal.planning_result.plan.summary,
+        action_names=tuple(action.tool_name for action in proposal.actions),
+        action_count=len(proposal.actions),
+        revision=state.revision_count,
+        proposal_fingerprint=fingerprint,
+    )
+    return request, fingerprint
+
+
+def _apply_approval_response(
+    state: AgentGraphState,
+    response: AgentApprovalResponse,
+    fingerprint: str,
+) -> AgentApprovalUpdate:
     if response.decision is AgentApprovalDecision.REQUEST_CHANGES:
         if state.revision_count >= MAX_PLAN_REVISIONS:
             return {
@@ -175,3 +197,13 @@ def request_approval(
     if response.decision is AgentApprovalDecision.REJECTED:
         terminal_update["terminal_status"] = AgentTerminalStatus.REJECTED
     return terminal_update
+
+
+def interrupt_for_approval(state: AgentGraphState) -> AgentApprovalUpdate:
+    """Pause durably and validate the exact decision supplied on resume."""
+
+    request, fingerprint = _build_approval_request(state)
+    response = AgentApprovalResponse.model_validate(
+        interrupt(request.model_dump(mode="json"))
+    )
+    return _apply_approval_response(state, response, fingerprint)

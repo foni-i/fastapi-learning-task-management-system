@@ -1,17 +1,25 @@
 """Synchronous, bounded LangGraph composition for the Stage 9 Agent."""
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Protocol, cast
 from uuid import UUID
 
 from langchain_core.runnables.graph import Graph
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.errors import GraphRecursionError
+from langgraph.errors import GraphInterrupt, GraphRecursionError
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command
 
 from app.agent.context import AgentRuntimeContext
 from app.agent.metrics import AgentRunMetrics
-from app.agent.nodes.approval import ApprovalDecider, request_approval
+from app.agent.nodes.approval import (
+    AgentApprovalInterrupt,
+    AgentApprovalResponse,
+    ApprovalDecider,
+    interrupt_for_approval,
+    request_approval,
+)
 from app.agent.nodes.context import analyze_goal, load_context
 from app.agent.nodes.execution import execute_tasks
 from app.agent.nodes.finalization import summarize, verify_result
@@ -64,15 +72,25 @@ type StateUpdate = dict[str, object]
 class _CompiledGraph(Protocol):
     def invoke(
         self,
-        input: dict[str, object],
+        input: dict[str, object] | Command[object],
         config: dict[str, object] | None = None,
     ) -> dict[str, object]: ...
 
     def get_graph(self) -> Graph: ...
 
+    def get_state(self, config: dict[str, object]) -> object: ...
+
 
 class AgentCheckpointThreadError(RuntimeError):
     """Reject missing or invalid host-owned checkpoint identity safely."""
+
+
+@dataclass(frozen=True)
+class AgentWorkflowProgress:
+    """Return either one safe approval interrupt or one terminal output."""
+
+    approval: AgentApprovalInterrupt | None = None
+    output: AgentGraphOutput | None = None
 
 
 def _failed(code: str) -> StateUpdate:
@@ -125,9 +143,11 @@ class AgentWorkflow:
         compiled: _CompiledGraph,
         *,
         checkpointing_enabled: bool = False,
+        durable_approval_enabled: bool = False,
     ) -> None:
         self._compiled = compiled
         self._checkpointing_enabled = checkpointing_enabled
+        self._durable_approval_enabled = durable_approval_enabled
 
     def get_graph(self) -> Graph:
         """Expose static topology for inspection without exposing runtime state."""
@@ -168,6 +188,55 @@ class AgentWorkflow:
                 summary=AGENT_GRAPH_FAILURE_SUMMARY,
             )
 
+    def start_durable(
+        self,
+        graph_input: AgentGraphInput,
+        *,
+        thread_id: UUID,
+    ) -> AgentWorkflowProgress:
+        """Run a checkpointed workflow until approval or terminal completion."""
+
+        if not self._durable_approval_enabled:
+            raise AgentCheckpointThreadError(AGENT_CHECKPOINT_THREAD_MESSAGE)
+        return self._advance(
+            AgentGraphInput.model_validate(graph_input).model_dump(mode="python"),
+            thread_id=thread_id,
+        )
+
+    def resume_durable(
+        self,
+        response: AgentApprovalResponse,
+        *,
+        thread_id: UUID,
+    ) -> AgentWorkflowProgress:
+        """Resume one durable approval using only a validated decision."""
+
+        if not self._durable_approval_enabled:
+            raise AgentCheckpointThreadError(AGENT_CHECKPOINT_THREAD_MESSAGE)
+        return self._advance(
+            Command(resume=response.model_dump(mode="json")),
+            thread_id=thread_id,
+        )
+
+    def _advance(
+        self,
+        graph_input: dict[str, object] | Command[object],
+        *,
+        thread_id: UUID,
+    ) -> AgentWorkflowProgress:
+        config: dict[str, object] = {
+            "recursion_limit": AGENT_GRAPH_RECURSION_LIMIT,
+            "configurable": {"thread_id": str(thread_id)},
+        }
+        result = self._compiled.invoke(graph_input, config=config)
+        snapshot = self._compiled.get_state(config)
+        interrupts = getattr(snapshot, "interrupts", ())
+        if interrupts:
+            approval = AgentApprovalInterrupt.model_validate(interrupts[0].value)
+            return AgentWorkflowProgress(approval=approval)
+        state = AgentGraphState.model_validate(result)
+        return AgentWorkflowProgress(output=summarize(state))
+
 
 def build_agent_graph(
     *,
@@ -179,6 +248,7 @@ def build_agent_graph(
     clock: Clock,
     sleeper: Sleeper,
     checkpointer: BaseCheckpointSaver[str] | None = None,
+    durable_approval: bool = False,
 ) -> AgentWorkflow:
     """Compile the eight accepted nodes with host-owned runtime dependencies."""
 
@@ -218,9 +288,16 @@ def build_agent_graph(
         except Exception:
             return _failed(_PLANNING_FAILED)
 
+    if durable_approval and checkpointer is None:
+        raise ValueError("Durable approval requires a checkpointer")
+
     def approval_node(state: AgentGraphState) -> StateUpdate:
         try:
+            if durable_approval:
+                return dict(interrupt_for_approval(state))
             return dict(request_approval(state, decider=approval_decider))
+        except GraphInterrupt:
+            raise
         except Exception:
             return _failed(_APPROVAL_FAILED)
 
@@ -322,4 +399,5 @@ def build_agent_graph(
     return AgentWorkflow(
         compiled,
         checkpointing_enabled=checkpointer is not None,
+        durable_approval_enabled=durable_approval,
     )

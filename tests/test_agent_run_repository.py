@@ -119,6 +119,53 @@ def test_database_failure_is_not_translated_or_rolled_back() -> None:
     session.commit.assert_not_called()
 
 
+def test_approval_queries_are_owner_scoped_and_revision_specific() -> None:
+    session = MagicMock(spec=Session)
+    repository = AgentRunRepository(session)
+    run_id = uuid4()
+    user_id = uuid4()
+
+    repository.get_owned_approval(run_id=run_id, user_id=user_id, revision=1)
+    exact_sql = _sql_text(session.scalar.call_args.args[0])
+    assert "agent_approvals.run_id =" in exact_sql
+    assert "agent_approvals.user_id =" in exact_sql
+    assert "agent_approvals.revision =" in exact_sql
+
+    repository.get_latest_owned_approval(run_id=run_id, user_id=user_id)
+    latest = session.scalar.call_args.args[0]
+    latest_sql = _sql_text(latest)
+    assert "agent_approvals.run_id =" in latest_sql
+    assert "agent_approvals.user_id =" in latest_sql
+    assert "ORDER BY agent_approvals.revision DESC" in latest_sql
+
+
+def test_create_and_update_approval_only_flush_without_transaction_control() -> None:
+    from datetime import UTC, datetime
+
+    session = MagicMock(spec=Session)
+    repository = AgentRunRepository(session)
+    decided_at = datetime(2026, 9, 4, tzinfo=UTC)
+    approval = repository.create_approval(
+        approval_id=uuid4(),
+        run_id=uuid4(),
+        user_id=uuid4(),
+        revision=0,
+        proposal_fingerprint="a" * 64,
+    )
+    repository.update_approval(
+        approval,
+        decision="APPROVED",
+        feedback=None,
+        decided_at=decided_at,
+    )
+
+    assert approval.decision == "APPROVED"
+    assert approval.decided_at == decided_at
+    assert session.flush.call_count == 2
+    session.commit.assert_not_called()
+    session.rollback.assert_not_called()
+
+
 def test_repository_source_has_no_checkpoint_or_http_transaction_concerns() -> None:
     source = (
         __import__("pathlib")

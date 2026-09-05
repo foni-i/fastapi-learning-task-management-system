@@ -11,6 +11,8 @@ AGENT_PLANNING_CONFIGURATION_MESSAGE = "Study planning is not configured"
 AGENT_PLANNING_UNAVAILABLE_MESSAGE = "Study planning is temporarily unavailable"
 AGENT_THREAD_NOT_FOUND_MESSAGE = "Agent thread does not exist"
 AGENT_RUN_NOT_FOUND_MESSAGE = "Agent run does not exist"
+AGENT_RUN_CONFLICT_MESSAGE = "Agent run cannot accept this approval"
+AGENT_WORKFLOW_UNAVAILABLE_MESSAGE = "Agent workflow is temporarily unavailable"
 
 
 class DuplicateEmailError(Exception):
@@ -59,3 +61,11 @@ class AgentThreadNotFoundError(Exception):
 
 class AgentRunNotFoundError(Exception):
     """Hide whether an Agent run is absent or belongs to another user."""
+
+
+class AgentRunConflictError(Exception):
+    """Reject stale, duplicate, or terminal approval attempts safely."""
+
+
+class AgentWorkflowUnavailableError(Exception):
+    """Hide graph and checkpoint infrastructure diagnostics."""

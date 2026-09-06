@@ -1,8 +1,8 @@
 # FastAPI STMS
 
-FastAPI STMS 是 StudyFlow Agent 的分阶段后端学习项目。当前已完成 Stage 1 应用骨架、Stage 2 PostgreSQL/迁移基础设施、Stage 3 用户注册、Stage 4 短期 Access Token 登录和当前用户能力、Stage 6 用户私有 Project 核心，以及 Stage 7 用户私有 Task 完整API。所有已实现链路使用 FastAPI、Pydantic 2、SQLAlchemy 2 同步 Session、PostgreSQL、Alembic、Argon2id 和固定 HS256 JWT，并有真实 PostgreSQL 端到端测试。
+FastAPI STMS 是 StudyFlow Agent 的分阶段后端学习项目。当前已完成 Stage 1～4 的应用、数据库和认证基础，Stage 6～7 的用户私有 Project/Task API，以及 Stage 8～10 的有界单Agent工作流、人工审批、PostgreSQL Checkpoint、幂等写入和安全SSE进度流。所有已实现链路使用 FastAPI、Pydantic 2、SQLAlchemy 2 同步 Session、PostgreSQL、Alembic、Argon2id 和固定 HS256 JWT，并有真实 PostgreSQL 端到端测试。
 
-当前尚未实现 Refresh Token、Token 持久化/轮换/撤销、退出登录、密码修改、管理员、密码找回或 Agent 功能。LangGraph、LLM 调用、Agent Tools、RAG、Checkpoint、HITL、Streaming、MCP 和多 Agent 都只是后续路线，不应把当前仓库描述成已经完成的 Agent 系统。
+当前尚未实现 Refresh Token、Token轮换/撤销、退出登录、密码修改、管理员、密码找回、RAG、MCP或多Agent。Agent普通测试只使用离线合成Provider；真实外部模型调用必须单独授权，不能把当前仓库描述成已完成RAG或多Agent的系统。
 
 ## 前置条件
 
@@ -471,9 +471,8 @@ Stage 6 已实现经过 Bearer 认证的用户私有 Project 核心。正式路�
 且不得输出完整 URL 或密码、操作 `postgres-dev`、删除 volume，或把 SQLite 当作
 PostgreSQL 行为的替代。
 
-当前仍没有 Project DELETE/restore；Project 的移除语义保持幂等归档。Task
-能力已经在下述 Stage 7 中独立实现。当前没有 Agent Tool、LLM、LangGraph、
-RAG、Checkpoint、HITL 或 Streaming 功能。
+Stage 6验收时仍没有 Project DELETE/restore；Project 的移除语义保持幂等归档。
+Task能力随后在Stage 7中独立实现，Agent能力则在Stage 8～10中逐步加入。
 
 ## Stage 7 Task API
 
@@ -546,8 +545,8 @@ Service拥有业务规则及写操作的 `commit`/`rollback`；Repository执行�
 同步Session。数据库中的命名主键、外键、状态、优先级、分钟数、日期和完成时间检查
 约束是直接写入时的最终完整性防线。
 
-当前没有标签、学习记录、重复任务、提醒、协作、Agent Tool、Provider、LLM、
-LangGraph、RAG或Checkpoint。Stage 8只有在Stage 7最终验收和owner确认后才能开始。
+Stage 7验收时没有标签、学习记录、重复任务、提醒或协作；Agent能力在后续
+Stage 8～10中实现，RAG仍属于Stage 11范围。
 
 ### Stage 7真实PostgreSQL验证
 
@@ -578,6 +577,53 @@ git diff --check
 Stage 7迁移往返使用唯一Task head `6e2f9a4c1b73`：从空的专用测试库升级到head，
 降级到Project边界 `4d8c7a1b2e90`（Users与Projects保留、Tasks移除），再升级到
 head并运行 `alembic check`。这些命令不得指向开发数据库。
+
+## Stage 8～10 Agent工作流
+
+当前Agent实现是一个有界、可恢复、需要明确人工审批的单Agent工作流。普通测试使用
+脚本化离线Provider，不会访问外部模型。模型只能产生严格结构化计划并选择固定
+allowlist中的Tool；可信用户身份来自Bearer认证上下文，Tool不能接收或覆盖
+`user_id`，也不能直接访问Session或Repository。调用方向固定为：
+
+```text
+HTTP Agent API -> LangGraph node -> Agent Tool -> Domain Service
+               -> owner-scoped Repository -> PostgreSQL
+```
+
+公开Agent路由为：
+
+| 方法 | 路径 | 结果 |
+| --- | --- | --- |
+| `POST` | `/api/v1/agent/runs` | 创建服务端Thread/Run并执行到审批中断，返回201 |
+| `GET` | `/api/v1/agent/runs/{run_id}` | 读取当前用户拥有的安全Run快照 |
+| `POST` | `/api/v1/agent/runs/{run_id}/approval` | 提交批准、拒绝或修改请求并恢复Run |
+| `GET` | `/api/v1/agent/runs/{run_id}/events` | 获取有序、可恢复的安全SSE进度事件 |
+
+客户端不能提供 `thread_id`、`run_id` 或 `user_id`。Thread ID是LangGraph
+`configurable.thread_id`使用的稳定产品身份，Run ID只标识一次产品执行，不作为
+Checkpoint ID。跨用户读取和不存在的Run统一返回安全404；审批必须与当前Run、
+revision和proposal fingerprint严格匹配，重复、过期或终止后的决定返回409。
+
+高影响的 `batch_create_tasks` 和 `delete_task` 由代码固定分类，必须同时满足写Tool
+开关、已验证提案、匹配的持久化审批以及数据库幂等claim。产品审计只持久化有界的
+Run、Approval和Tool执行摘要，不保存Tool参数、完整Prompt、模型原始响应或隐藏推理。
+LangGraph官方PostgreSQL Checkpoint只负责恢复图状态，不能替代产品审计记录。
+
+SSE事件版本为 `agent-event.v1`，公开run/node状态、Tool开始与安全结果摘要、审批需求、
+安全指标、heartbeat、terminal result和safe error。事件ID在Run内稳定且单调，
+`Last-Event-ID`只恢复其后的保留事件；无效或不属于该Run的cursor安全失败。数据库
+读取在流式响应开始前已经完成并关闭请求Session，heartbeat不携带业务数据，一个
+完成Run只产生一个terminal事件。
+
+Stage 10真实验收仅使用可丢弃的 `postgres-test`。Windows不能绑定默认5433时，可在
+当前进程使用 `STMS_POSTGRES_TEST_PORT=15433`，并让 `STMS_TEST_DATABASE_URL` 使用
+同一端口。测试必须先通过专用数据库安全门，再从空库升级到唯一head
+`c4d8a1f6e205`；最终验收降级到Stage 9边界 `6e2f9a4c1b73`，确认Stage 10产品表移除而
+领域表保留，然后重新升级并运行 `alembic current`、`heads` 和 `check`。不得操作
+`postgres-dev`、删除volume、输出完整数据库URL或使用SQLite代替PostgreSQL行为。
+
+当前没有Refresh Token、logout、密码修改、RAG、pgvector、外部Tracing、MCP或
+多Agent。Stage 11只有在Stage 10验收并获得owner确认后才能开始。
 
 ## 测试和质量检查
 
@@ -726,8 +772,8 @@ FastAPI-STMS/
 
 Stage 3、4、6和7已经形成注册、认证、当前用户、Project与Task的完整同步分层基础。Stage 7真实PostgreSQL验收证明全部Task HTTP操作、两用户隔离、状态机、稳定查询、命名约束、迁移往返和精确清理一致。
 
-Stage 8现已提供内部、离线可测的Agent基础：可替换OpenAI Provider适配器、版本化Prompt、严格结构化规划结果、四个Service-backed allowlist工具、有固定轮次和工具次数上限的循环、传输无关的安全进度事件，以及不含敏感载荷的Token/延迟指标。它没有公开Agent HTTP接口，普通测试不会访问外部模型。
+Stage 8提供可替换Provider、版本化Prompt、严格结构化结果、Service-backed Tool和有界循环；Stage 9使用八个明确节点组成单Agent LangGraph；Stage 10增加公开Run/审批API、官方PostgreSQL Checkpoint、产品审计记录、数据库幂等写入、高影响操作审批和安全SSE。普通测试不会访问外部模型。
 
 外部Provider smoke test默认被`external_provider`标记排除。只有owner明确授权网络、凭据和可能产生的费用后，才可在仅包含合成提示的环境中显式设置`STMS_RUN_EXTERNAL_PROVIDER_SMOKE=1`并单独选择该marker；不得在普通CI中启用，也不得输出API Key或完整模型响应。
 
-Stage 5的Refresh Token、轮换、退出登录和密码修改保留为非阻塞的延后认证增强轨道。下一阶段是Stage 9 Single-Agent LangGraph workflow，但必须先获得owner对Stage 8的确认。当前尚未实现公开Agent API、LangGraph、RAG、Checkpoint、HITL、SSE传输、MCP或多Agent。
+Stage 5的Refresh Token、轮换、退出登录和密码修改保留为非阻塞的延后认证增强轨道。Stage 10完成后必须等待owner确认；下一阶段是Stage 11的限定文档RAG、离线评估、安全与Tracing。当前尚未实现RAG、pgvector、外部Tracing、MCP或多Agent。

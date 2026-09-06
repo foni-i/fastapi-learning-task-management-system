@@ -4421,20 +4421,333 @@ MCP, or introduce multi-agent behavior.
 ### Stage 11 — Focused RAG, evaluation, security, and tracing
 
 RAG is limited to user-uploaded syllabi, exam requirements, and study material
-used to produce source-grounded learning plans.
+used to produce source-grounded learning plans. Uploaded and retrieved content is
+always untrusted data: it cannot alter authenticated identity, ownership checks,
+approval requirements, system policy, or the code-owned Tool allowlist. Ordinary
+tests use deterministic parser, embedding, retrieval, and model fakes and never
+call an external Provider.
 
-- **Task 11.1:** Upload metadata, document parsing, and bounded file safety.
-- **Task 11.2:** Chunking, embedding adapter, pgvector migration, and storage.
-- **Task 11.3:** User/document metadata filtering and vector retrieval.
-- **Task 11.4:** Hybrid retrieval, reranker decision, and source citations.
-- **Task 11.5:** Context assembly and prompt-injection boundary tests.
-- **Task 11.6:** Safe tracing for nodes, tools, errors, token use, and latency.
-- **Task 11.7:** Versioned 30–50 sample offline evaluation dataset and runner.
-- **Task 11.8:** Metrics for extraction, tool/argument accuracy, plan violations,
-  writes, approval bypass, recovery, duplicates, latency, and token cost.
+### Task 11.1 — Owner-scoped document upload, parsing, and file safety
 
-Retrieved instructions are untrusted context and cannot alter identity,
-authorization, approval, system policy, or the tool allowlist.
+**Estimated time:** 1–2 focused hours. **Migration:** one reversible document
+revision based on Stage 10 head `c4d8a1f6e205`. **Real PostgreSQL:** required.
+
+**Goal and prerequisites:** After Stage 10 acceptance, let an authenticated user
+upload a bounded syllabus, exam requirement, or study document and persist one
+owner-scoped parsed record without exposing extracted text.
+
+**Files:** New `app/models/knowledge_document.py`,
+`app/schemas/knowledge_document.py`, `app/repositories/knowledge_documents.py`,
+`app/services/knowledge_documents.py`,
+`app/api/v1/endpoints/knowledge_documents.py`, one generated Alembic revision,
+necessary router/model exports, `tests/test_knowledge_document_schemas.py`,
+`tests/test_knowledge_document_service.py`, `tests/test_knowledge_document_api.py`,
+and `tests/integration/test_knowledge_documents.py`. Add a maintained PDF parser
+to `pyproject.toml`/`uv.lock` only after Python 3.14 compatibility is confirmed.
+
+**Implementation scope:** Add `POST /api/v1/knowledge/documents` using
+`multipart/form-data`. Allow `.txt`, `.md`, and unencrypted `.pdf` with matching
+allowlisted media type and PDF signature. Bound raw input to 5 MiB, PDF input to
+100 pages, display name to 255 characters, and normalized extracted Unicode text
+to 200,000 characters. Reject empty, encrypted, malformed, unsupported,
+oversized, or undecodable input with fixed safe errors. Persist UUID, trusted
+`user_id`, display name, media type, byte count, SHA-256 fingerprint, page count,
+private extracted text, parse status, and UTC timestamps. Use named checks,
+owner foreign key, `(id, user_id)` uniqueness, and owner/status indexes. Public
+metadata excludes raw bytes and text. Repository flushes; Service commits or
+rolls back; Router closes the upload.
+
+**Not included:** Remote URLs, archives, Office/HTML, OCR, antivirus claims,
+object storage, list/delete APIs, chunks, embeddings, pgvector, retrieval, Agent
+context, or model calls.
+
+**Tests and commands:** Cover every size/page/name/text boundary, MIME/signature
+mismatch, malformed/encrypted/blank content, parser failure rollback, owner
+derivation/isolation, public whitelist, file closure, safe errors, transaction
+ownership, migration constraints, and precise cleanup. Run focused tests and
+ordinary quality gates; on guarded `postgres-test`, upgrade from
+`c4d8a1f6e205`, inspect the table, downgrade and prove only it is removed,
+re-upgrade, then run `alembic current`, `heads`, `check`, and integration tests.
+
+**Acceptance criteria:** Supported files produce safe metadata and one private
+owned row; rejected content leaves no row or sensitive echo; cross-user access is
+safe 404; migration round-trip and quality gates pass.
+
+**Learning points:** Streaming upload bounds; hostile parser input; private model
+versus public schema. **Stop boundary:** Stop before chunks or embeddings.
+
+### Task 11.2 — Deterministic chunking, embedding port, and pgvector storage
+
+**Estimated time:** 1–2 focused hours. **Migration:** exactly one reversible
+pgvector/chunk revision based on the Task 11.1 head. **Real PostgreSQL:** required;
+external Provider access is not.
+
+**Goal and prerequisites:** With Task 11.1 accepted, turn one owned parsed
+document into deterministic chunks and fixed-size embeddings stored for lexical
+and vector search. Both Compose PostgreSQL services must use the same pinned
+pgvector-capable PostgreSQL 17 image before the migration runs.
+
+**Files:** New `app/agent/embeddings.py`,
+`app/models/knowledge_document_chunk.py`,
+`app/repositories/knowledge_document_chunks.py`,
+`app/services/knowledge_document_indexing.py`, one generated migration, focused
+`tests/test_document_chunking.py`, `tests/test_embedding_provider.py`,
+`tests/test_document_indexing_service.py`, and
+`tests/integration/test_document_embeddings.py`. Minimally update settings,
+document endpoint/schema, model exports, `alembic/env.py`, `compose.yaml`,
+`.env.example`, README, `pyproject.toml`, and `uv.lock`; add only the compatible
+`pgvector` package and image support.
+
+**Implementation scope:** Define a synchronous replaceable `EmbeddingProvider`
+Protocol, deterministic fake, and adapter over the existing SDK. Fix the MVP
+contract at 1,536 finite dimensions and validate it at the adapter and Service.
+Chunk by page and character boundary at no more than 2,000 characters, with
+200-character overlap, stable ordinal/fingerprint, and at most 200 chunks per
+document. An explicit owner-scoped indexing use case atomically replaces chunks;
+upload does not call an embedding Provider automatically. The single migration
+owns the `vector` extension and creates the chunk table with private text,
+page/ordinal/fingerprint, `vector(1536)`, generated simple-configuration
+`tsvector`, composite owner foreign key, named bounds/uniqueness, GIN lexical
+index, and HNSW cosine index. Repository never commits.
+
+**Not included:** Search, query embedding, hybrid ranking, reranker, prompt
+context, background jobs, arbitrary dimensions, or real external embedding tests.
+
+**Tests and commands:** Cover chunk boundaries/order/overlap, Unicode, maximum
+count, stable fingerprints, vector length and non-finite rejection, bounded fake
+calls, atomic replacement/rollback, ownership, safe adapter errors, metadata and
+named indexes. Run focused tests; on guarded pgvector `postgres-test`, verify the
+extension/table/vector/keys/indexes, downgrade to Task 11.1 retaining documents,
+re-upgrade, and run `current`, `heads`, `check`, integration and all quality gates.
+
+**Acceptance criteria:** Identical input yields identical chunks; invalid vectors
+never persist; replacement is atomic; PostgreSQL proves lexical/vector storage;
+ordinary tests remain offline.
+
+**Learning points:** Provider ports; deterministic chunk identity; extension and
+vector-index migrations. **Stop boundary:** Stop before retrieval.
+
+### Task 11.3 — Owner-filtered vector retrieval and search Tool
+
+**Estimated time:** 1–2 focused hours. **Migration/dependency:** none. **Real
+PostgreSQL:** required for distance and ownership behavior.
+
+**Goal and prerequisites:** After Task 11.2, retrieve relevant chunks for the
+authenticated owner through one strict read-only Agent Tool.
+
+**Files:** New `app/schemas/knowledge_retrieval.py` and
+`app/services/knowledge_retrieval.py`; extend chunk Repository,
+`app/agent/tools.py`, `app/services/agent_domain.py`, and exports; add
+`tests/test_knowledge_retrieval.py`, `tests/test_agent_knowledge_tool.py`, and
+`tests/integration/test_knowledge_retrieval.py`.
+
+**Implementation scope:** Define a 1–2,000 character query, `top_k` 1–20, and at
+most 20 optional document UUID filters. Embed once, then perform cosine search
+with trusted `user_id` and owned-document predicates applied before ranking.
+Return stable citation ID, document/chunk IDs, safe source name, page/ordinal,
+distance, and at most 500 excerpt characters. Add only `search_knowledge`; model
+arguments cannot contain `user_id`, Session, SQL, vectors, or operators. Tool
+calls Gateway, Gateway closes one synchronous Session, Service/Repository own
+retrieval, and reads do not commit.
+
+**Not included:** Lexical/hybrid search, reranking, prompt/state changes, public
+search endpoint, writes, migration, or real external Provider.
+
+**Tests and commands:** Cover all query/filter/top-k bounds, exact Tool schema,
+identity/vector/SQL rejection, one embedding call, owner predicates, deterministic
+ties, public bounds, zero results, cross-user isolation, Session closure, no
+commit, and safe errors. Run focused tests and guarded PostgreSQL tests with two
+owners and deterministic vectors, followed by integration and ordinary quality
+gates.
+
+**Acceptance criteria:** At most 20 deterministic public citations are returned;
+foreign chunks never appear even when closer; no network is required.
+
+**Learning points:** Filter-before-rank authorization; cosine distance; safe
+retrieval Tools. **Stop boundary:** Stop before hybrid fusion and prompt use.
+
+### Task 11.4 — Hybrid retrieval, deterministic ranking, and citations
+
+**Estimated time:** 1–2 focused hours. **Migration/dependency:** none. **Real
+PostgreSQL:** required.
+
+**Goal and prerequisites:** With Task 11.3 accepted, combine owner-scoped lexical
+and vector candidates into stable cited evidence.
+
+**Files:** Extend chunk Repository, retrieval Service/schema, and
+`search_knowledge`; new `app/agent/retrieval.py`; add
+`tests/test_hybrid_retrieval.py` and extend retrieval integration tests.
+
+**Implementation scope:** Fetch separate bounded vector and PostgreSQL full-text
+candidate lists, at most 40 each, then apply code-owned reciprocal-rank fusion
+with chunk-ID tie breaking and at most 20 final results. The MVP reranker decision
+is deterministic RRF: do not add a model/cross-encoder until evaluation proves a
+need. Citation IDs derive from document/chunk identity and expose safe source,
+optional page, excerpt, and rank evidence; citation does not claim factual truth.
+
+**Not included:** Neural reranker, arbitrary weights, web/external corpus, prompt
+assembly, plan changes, endpoint, migration, or extra model calls.
+
+**Tests and commands:** Cover lexical-only/vector-only/overlap results, RRF math,
+ties/caps, citation stability, missing page, both owner filters, and hostile text
+remaining data. On guarded PostgreSQL, seed ranking disagreements for two owners
+and prove fusion/isolation, then run retrieval/Tool, integration, Alembic check,
+and ordinary quality gates.
+
+**Acceptance criteria:** Fusion is deterministic, bounded, owner-safe, and every
+excerpt maps to one stable source; no unmeasured reranker dependency is added.
+
+**Learning points:** Lexical/vector complementarity; RRF; citation identity versus
+verification. **Stop boundary:** Stop before Agent prompt/state integration.
+
+### Task 11.5 — Grounded context and prompt-injection boundaries
+
+**Estimated time:** 1–2 focused hours. **Migration/dependency:** none. **Real
+PostgreSQL:** not required for ordinary acceptance.
+
+**Goal and prerequisites:** After Task 11.4, place bounded cited evidence into the
+existing graph without letting document instructions become policy or authority.
+
+**Files:** New `app/agent/grounding.py`; extend `app/agent/state.py`, context node,
+prompts, planning schemas, validation, and summary only as required; add
+`tests/test_agent_grounding.py` and prompt/state/context/graph regressions.
+
+**Implementation scope:** `load_context` calls `search_knowledge` through the
+existing Tool executor with trusted identity and a bounded goal-derived query.
+Store only serializable public evidence. Assemble at most 10 excerpts and 12,000
+characters using explicit untrusted-data delimiters. Add bounded citation IDs to
+plan output; deterministic validation rejects unknown citations and requires a
+valid citation for grounded claims when evidence exists. Approval fingerprinting
+covers the final cited proposal. Documents cannot alter identity, Tool allowlist,
+approval, schema, or system instructions.
+
+**Not included:** Complete documents in state/prompt, hidden reasoning,
+instruction execution, authorization from content, web content, Tool expansion,
+pre-approval writes, migration, or real model calls.
+
+**Tests and commands:** Cover no-evidence fallback, order/size bounds, delimiter
+handling, hostile identity/policy/self-approval/secret/Tool instructions, citation
+validation, prompt version, checkpoint JSON round-trip, fingerprint changes, and
+absence of complete content from errors/events/traces. Run focused fake-based
+tests, Stage 8–10 regressions, and all ordinary quality gates.
+
+**Acceptance criteria:** A strict cited plan can be built; fabricated citations
+fail closed; adversarial content remains data and cannot change policy.
+
+**Learning points:** Data/instruction separation; citation validation; bounded
+serializable RAG state. **Stop boundary:** Stop before tracing/evaluation.
+
+### Task 11.6 — Safe Agent tracing and bounded observability
+
+**Estimated time:** 1–2 focused hours. **Migration/dependency/PostgreSQL:** none.
+
+**Goal and prerequisites:** After Task 11.5, trace nodes, Tools, safe errors,
+tokens, and latency without recording content, credentials, or hidden reasoning.
+
+**Files:** New `app/agent/tracing.py`; narrow instrumentation in graph/nodes,
+Tool execution coordinator, and workflow composition; add
+`tests/test_agent_tracing.py` plus metrics/graph/security regressions.
+
+**Implementation scope:** Define injectable synchronous `TraceSink`, no-op
+default, recording fake, and strict versioned event. Allow only run/thread IDs,
+prompt version, node/Tool name, outcome, safe error code, attempts/counts, token
+counts, and nonnegative latency. Bound keys/counts/strings and test a
+non-disruptive sink-failure policy. Traces remain separate from product audit and
+checkpoints; no vendor package is added.
+
+**Not included:** Goal/document/prompt/model content, Tool arguments/results,
+credentials, stack traces, database URLs, hidden reasoning, vendor export, new
+table, public tracing API, or migration.
+
+**Tests and commands:** Cover schema, correlations, start/finish/failure order,
+retries, metrics, sink failure, unchanged control flow, and a sensitive-data
+denylist across traces/logs/SSE/audit. Run tracing/metrics/graph/security focused
+tests and all ordinary quality gates without Docker or network.
+
+**Acceptance criteria:** Recording fakes receive useful operational evidence using
+only allowlisted metadata; tracing cannot leak content or change results.
+
+**Learning points:** Telemetry contracts; safe correlation; observability failure
+isolation. **Stop boundary:** Stop before datasets or vendor tracing.
+
+### Task 11.7 — Versioned offline evaluation dataset and runner
+
+**Estimated time:** 1–2 focused hours. **Network/credentials/PostgreSQL:** none.
+
+**Goal and prerequisites:** After Task 11.6, create a reproducible 30–50 case
+offline benchmark using deterministic fakes and no domain writes.
+
+**Files:** New `app/agent/evaluation.py`, `evals/stage11/dataset.v1.jsonl`,
+`evals/stage11/README.md`, and `tests/test_agent_evaluation.py`.
+
+**Implementation scope:** Add strict versioned case/expectation schemas and a
+runner with injected model, embedding, retrieval, clock, and Tool fakes. Include
+30–50 synthetic cases for extraction, Tool/argument validity, citations, plan
+constraints, malicious documents, approval bypass, recovery, duplicates, safe
+errors, latency, and token use. Default Tools are dry-run recorders. Output stable
+per-case evidence and aggregate counts; malformed rows reveal only case ID.
+
+**Not included:** Real Provider, production DB, hidden-reasoning grades,
+subjective model judge, training, vendor eval platform, or threshold tuning after
+seeing results.
+
+**Tests and commands:** Prove version/count/unique IDs/category coverage,
+deterministic order/output, fake-only execution, zero writes/network, malformed
+bounds, safe reports, and injection coverage. Run the offline runner twice and
+compare normalized output, then security and ordinary quality gates.
+
+**Acceptance criteria:** A clean checkout runs 30–50 cases offline with identical
+ordered evidence and no key, sensitive payload, network request, or write.
+
+**Learning points:** Versioned eval contracts; reproducible dependency injection;
+deterministic checks versus model judging. **Stop boundary:** Stop before scoring.
+
+### Task 11.8 — Metrics and final Stage 11 verification
+
+**Estimated time:** 1–2 focused hours. **Migration:** none; validate both Stage 11
+revisions. **Real PostgreSQL:** required; external Provider is not.
+
+**Goal and prerequisites:** With Tasks 11.1–11.7 accepted, calculate predeclared
+quality/safety metrics and close Stage 11 with RAG, security, migration, and
+observability evidence.
+
+**Files:** New `app/agent/evaluation_metrics.py`,
+`evals/stage11/baseline.v1.json`, and
+`tests/integration/test_stage11_rag.py`; extend evaluation files/tests and README
+only with implemented behavior, limitations, safe commands, and measured results.
+
+**Implementation scope:** Calculate extraction exact match, Tool-name accuracy,
+argument validity/accuracy, citation validity, plan-violation rate, unintended
+writes, approval bypasses, recovery successes, duplicate writes, latency
+percentiles, and token totals/averages. Define denominators, zero cases,
+deterministic rounding, category counts, predeclared thresholds, and nonzero exit
+on failure. Missing usage stays missing. Baseline stores only safe case IDs and
+scores, never prompts, documents, model output, Tool arguments, credentials,
+hidden reasoning, or database URLs.
+
+**Not included:** Metric gaming, unversioned overwrite, chain-of-thought grading,
+real Provider requirement, production data, dashboard/vendor export, Stage 12,
+MCP, or multi-agent behavior.
+
+**Tests and commands:** Unit-test every formula/threshold/redaction rule and
+reproduce the offline baseline twice. On empty guarded pgvector `postgres-test`,
+upgrade to Stage 11 head; verify document/chunk tables, owner keys, vector size,
+indexes, and extension; run ownership/retrieval/grounding integration; downgrade
+to `c4d8a1f6e205` proving Stage 11 tables are removed while Stage 10/domain tables
+remain; re-upgrade; run `alembic current`, `heads`, `check`, full integration,
+ordinary/warnings, eval, injection, approval/idempotency/recovery/tracing, Ruff,
+format, mypy, lock, and diff checks. Stop only `postgres-test`.
+
+**Acceptance criteria:** Predeclared metrics are reproducible and pass; hostile
+documents cannot affect policy; owner filtering, citations, recovery/idempotency,
+tracing redaction, migrations, and Stage 1–10 regressions pass without external
+Provider or sensitive input.
+
+**Learning points:** Metric denominators; offline safety release gates; consistency
+across RAG storage, policy, observability, and migrations.
+
+**Stop boundary:** Task 11.8 completes Stage 11. Stop for owner confirmation; do
+not begin Stage 12, call a real Provider, expose MCP, or add multi-agent behavior.
 
 ### Stage 12 — Deployment and job-search presentation
 

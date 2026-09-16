@@ -3,8 +3,8 @@
 ## 状态
 
 - Completed（2026-09-07）
-- 验收依据：[roadmap Stage 12 的 Task 12.4 验收记录](../roadmap.md#stage-12--deployment-and-job-search-presentation)。最小测试 41 passed，29 个引用路径存在，Ruff、格式、mypy、lock 和 diff 检查通过；以下保留原始任务契约。
-- 所属 Stage：Stage 12 — Deployment and job-search presentation
+- 验收依据：[roadmap Stage 12 的 Task 12.4 验收记录](../roadmap.md#stage-12--deployment-and-engineering-presentation)。最小测试 41 passed，29 个引用路径存在，Ruff、格式、mypy、lock 和 diff 检查通过；以下保留原始任务契约。
+- 所属 Stage：Stage 12 — Deployment and engineering presentation
 - 前置 Task：Task 12.3（使用文档、术语、接口示例与 synthetic demo 资料已验收）
 - 后续依赖：Task 12.5 的演示/录制手册引用本 Task 的架构图；Task 12.6 使用这些边界
   描述风险和安全保证。
@@ -66,7 +66,7 @@
 - 不引入图形生成、文档站点、Mermaid CLI、Graphviz 或新依赖。
 - 不生成 PNG/SVG 截图作为唯一架构来源；GitHub 可渲染的文本图为规范来源。
 - 不编写 demo/录制手册或测试结果页；属于 Task 12.5。
-- 不撰写安全/成本评估或面试材料；属于 Task 12.6/12.7。
+- 不撰写安全/成本评估；属于 Task 12.6。
 - 不设计未来 MCP、多 Agent、Kubernetes 或微服务架构。
 
 ## 设计与接口约束

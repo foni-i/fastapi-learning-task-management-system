@@ -229,4 +229,4 @@ git diff --cached --check
 - migration 未变化证明；
 - 最小、integration、最终质量门；
 - 残余 parser/DoS 风险、调用链和三个学习点；
-- 明确停止，未开始 R4 或 Task 12.7。
+- 明确停止，未开始 R4 或后续产品阶段。

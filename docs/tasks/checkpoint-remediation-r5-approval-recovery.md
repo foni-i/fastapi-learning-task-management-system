@@ -112,7 +112,7 @@ Tool execution 表已经处理 replay。方案 B 是解决已证明崩溃窗口�
 
 - 不实现后台 worker、消息队列、Redis、Celery 或定时扫描器。
 - 不查询或修改官方 checkpoint 私有表；只用 LangGraph 公共 API。
-- 不改变 proposal preview P0、公共 approval payload 或 Task 12.7。
+- 不改变 proposal preview P0、公共 approval payload 或后续产品阶段。
 - 不弱化 owner/revision/fingerprint、approval、高影响 policy 或 idempotency。
 - 不自动重试 `UNKNOWN` Tool outcome，不提供 exactly-once 宣称。
 - 不允许不同 decision/feedback 覆盖已提交审批。
@@ -282,7 +282,7 @@ git diff --cached --check
 - 需要 background worker/outbox 才能满足恢复，而 owner 尚未重新选择方案；
 - advisory transaction lock 不能在进程终止后可靠释放或会破坏 connection pool；
 - 无法证明高影响 Tool 在响应丢失/竞争时最多一次 domain write；
-- 需要修改 approval preview P0 或改变 Task 12.7；
+- 需要修改 approval preview P0 或进入后续产品阶段；
 - 新 migration 影响 R5 之外表或历史 revision；
 - 候选暂存区被取消暂存、commit 或 push。
 
@@ -296,4 +296,4 @@ git diff --cached --check
 - PostgreSQL、migration、完整 integration 和质量门；
 - 残余 UNKNOWN/连接占用风险；
 - 调用链和三个学习点；
-- 明确停止，未开始 R6 或 Task 12.7。
+- 明确停止，未开始 R6 或后续产品阶段。

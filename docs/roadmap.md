@@ -4801,7 +4801,7 @@ across RAG storage, policy, observability, and migrations.
 **Stop boundary:** Task 11.8 completes Stage 11. Stop for owner confirmation; do
 not begin Stage 12, call a real Provider, expose MCP, or add multi-agent behavior.
 
-### Stage 12 — Deployment and job-search presentation
+### Stage 12 — Deployment and engineering presentation
 
 - **Task 12.1:** Application service in Docker Compose and one-command startup.
   **Acceptance status (2026-09-07):** Accepted with a pinned Python 3.14/uv
@@ -4812,14 +4812,15 @@ not begin Stage 12, call a real Provider, expose MCP, or add multi-agent behavio
   volume was preserved. Compose contains no JWT fallback secret; authenticated
   use requires explicit shell or uncommitted `.env` injection.
 - **Task 12.2:** GitHub Actions for tests, integration safety, Ruff, mypy, and lock.
-  **Implementation status (2026-09-07):** Added an uncommitted two-job workflow
-  for offline quality checks and a guarded, dedicated PostgreSQL 17 + pgvector
-  integration service. Local static and ordinary quality checks pass. Docker was
-  re-confirmed through its absolute executable path as Client/Server 29.7.2,
-  Docker Desktop 4.87.0, `desktop-linux`, and Compose v5.4.0; direct sandbox
-  failures are access limitations, not a missing installation. This repository
-  is already linked to GitHub, but the Task 12.2 files have not been committed or
-  pushed, so no GitHub Actions run includes this workflow yet.
+  **Acceptance status (updated 2026-09-16):** The two-job workflow separates
+  offline quality checks from a guarded, dedicated PostgreSQL 17 + pgvector
+  integration service. R1 added the job-scoped test-only JWT value required by
+  integration without exposing JWT/database/Provider configuration to quality;
+  action revisions remain pinned by full SHA. Checkpoint commit `b05adae` was
+  pushed and matching [GitHub Actions run 35097448961](https://github.com/foni-i/fastapi-learning-task-management-system/actions/runs/35097448961)
+  completed successfully: offline quality in 1m02s and PostgreSQL integration/
+  migrations in 47s. This proves that exact commit, not later uncommitted work or
+  production deployment.
 - **Task 12.3:** Complete README, `.env.example`, API examples, and demo data.
   **Acceptance status (2026-09-07):** Accepted with distinct local uv and
   one-command Compose paths, a complete existing-variable configuration table,
@@ -4865,19 +4866,22 @@ not begin Stage 12, call a real Provider, expose MCP, or add multi-agent behavio
   integration/external cases deselected, followed by Ruff, format, mypy, lock,
   and diff checks. No runtime behavior, Docker, database, Provider, network,
   migration, dependency, commit, or push was used.
-- **Task 12.7:** Resume description and interview question/answer checklist.
+**Stage 12 status (2026-09-16):** Tasks 12.1–12.6 have implementation and local
+acceptance evidence, and the checkpoint workflow has a matching successful remote
+run. Stage 12 engineering delivery is complete; post-Stage 12 work remains out
+of scope.
 
-### Checkpoint remediation before Task 12.7
+### Checkpoint remediation
 
 **Status:** R1 through R6 completed local verification and were followed by the
 owner's instruction to proceed between each remediation. The owner accepted R6
 by authorizing the next gate, and the independent pre-commit review of the
 combined Stage 11 through Task 12.6 candidate checkpoint completed on
-2026-09-16 with no P0, P1, or P2 blocker. Checkpoint commit and push remain
-pending explicit owner authorization. These six tasks are corrective gates for
+2026-09-16 with no P0, P1, or P2 blocker. After explicit authorization, the
+checkpoint was committed as `b05adae`, pushed to `origin/main`, and verified by
+successful remote run `35097448961`. These six tasks are corrective gates for
 that checkpoint, not new numbered Stage 12 features.
-They do not renumber, implement, or change the scope of Task 12.7, and they do
-not implement the separately unscheduled approval-preview P0.
+They do not implement the separately unscheduled approval-preview P0.
 
 - **R1 — CI runtime parity:** Add an explicitly test-only, job-scoped synthetic
   `STMS_ACCESS_TOKEN_SECRET` to the integration job; prove the no-secret failure,
@@ -5030,9 +5034,9 @@ not implement the separately unscheduled approval-preview P0.
   and restarting Windows; the Docker engine then recovered, the development named
   volume remained present, and only `postgres-test` was started and stopped. No
   real Provider/network call, dependency/schema change, commit, push, remote
-  GitHub Actions run, independent re-review, or Task 12.7 work occurred.
+  GitHub Actions run, independent re-review, or later-stage work occurred.
 
-The fixed gate order is:
+The completed gate order was:
 
 ```text
 R1 → R2 → R3 → R4 → R5 → R6
@@ -5040,11 +5044,11 @@ R1 → R2 → R3 → R4 → R5 → R6
 → checkpoint commit
 → push
 → remote GitHub Actions
-→ Task 12.7
 ```
 
-Each remediation remains one explicit task with its own tests, quality gates,
-report, and owner stop. No step may infer authorization for a later step.
+Each remediation remained one explicit task with its own tests, quality gates,
+report, and owner stop. Completion does not authorize later MCP, multi-Agent,
+Version 2, or production work.
 
 MCP exposure of project/task capabilities and multi-agent experiments begin only
 after Stage 12 acceptance. They are not part of the first Agent MVP.
@@ -5063,8 +5067,8 @@ after Stage 12 acceptance. They are not part of the first Agent MVP.
 
 - **P0 — 所有者作用域的有界审批 proposal 预览与 fingerprint 一致性验证**
   **Status:** Pending scheduling; not implemented. No formal Task number is
-  assigned. This is an independent public-contract security improvement, not
-  part of Task 12.7; existing task numbers and dependencies remain unchanged.
+  assigned. This is an independent public-contract security improvement;
+  existing task numbers and dependencies remain unchanged.
   Before implementation, confirm the public preview contract. Acceptance must
   prove all of the following with schema, service, and API tests:
   - Public fields use an explicit allowlist; preview item counts and total size

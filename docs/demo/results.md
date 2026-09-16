@@ -92,6 +92,17 @@ Tokens, database URLs, or credentials.
 R6 started and stopped only `postgres-test`. A final read-only check showed all
 three Compose services exited and `fastapi-stms-postgres-dev-data` still present.
 
-Remote CI evidence remains unavailable because the Task 12.2 workflow changes
-have not been committed or pushed; there is no matching GitHub Actions run or
-badge. No real Provider or external model network was used.
+At the time of the 2026-09-07 demo snapshot, remote CI evidence was unavailable
+because the Task 12.2 workflow changes had not yet been committed or pushed.
+No real Provider or external model network was used.
+
+## Checkpoint and remote CI update
+
+On 2026-09-16, the Stage 11 through checkpoint-remediation work was committed as
+`b05adae` and pushed to `origin/main`. Matching
+[GitHub Actions run 35097448961](https://github.com/foni-i/fastapi-learning-task-management-system/actions/runs/35097448961)
+completed successfully: `Offline tests and quality` succeeded in 1m02s and
+`PostgreSQL integration and migrations` succeeded in 47s. This remote result
+applies to that exact checkpoint commit, not to later uncommitted documentation.
+It is CI evidence, not production deployment, real-Provider, or
+SLA evidence.

@@ -4,7 +4,7 @@
 
 The long-term product is **StudyFlow Agent: a personalized learning-planning and
 task-management Agent built with FastAPI, LangGraph, and PostgreSQL**. It is a
-backend-first job-search flagship project, not a generic chat bot. It must remain
+backend-first learning project, not a generic chat bot. It must remain
 runnable, tested, deployable, and understandable by its owner at every stage.
 
 The product succeeds when it combines a complete authenticated project/task

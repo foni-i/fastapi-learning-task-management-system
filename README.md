@@ -1,6 +1,6 @@
 # FastAPI STMS
 
-FastAPI STMS 是 StudyFlow Agent 的分阶段后端学习项目。当前已完成 Stage 1～4 的应用、数据库和认证基础，Stage 6～7 的用户私有 Project/Task API，Stage 8～10 的有界单Agent工作流，Stage 11 的安全RAG与离线评估，以及 Stage 12.1 的可复现Compose应用镜像。所有已实现链路使用 FastAPI、Pydantic 2、SQLAlchemy 2 同步 Session、PostgreSQL、Alembic、Argon2id 和固定 HS256 JWT，并有真实 PostgreSQL 端到端测试。
+FastAPI STMS 是 StudyFlow Agent 的分阶段后端学习项目。当前已完成 Stage 1～4 的应用、数据库和认证基础，Stage 6～7 的用户私有 Project/Task API，Stage 8～10 的有界单Agent工作流，Stage 11 的安全RAG与离线评估，以及 Stage 12 的可复现工程交付。所有已实现链路使用 FastAPI、Pydantic 2、SQLAlchemy 2 同步 Session、PostgreSQL、Alembic、Argon2id 和固定 HS256 JWT，并有真实 PostgreSQL 端到端测试。
 
 当前尚未实现 Refresh Token、Token轮换/撤销、退出登录、密码修改、管理员、密码找回、grounded claim事实核验、外部Tracing供应商、MCP或多Agent。Agent与Embedding普通测试只使用离线合成Provider；真实外部模型调用必须单独授权，检索citation只表示来源而不保证内容事实为真。
 
@@ -948,10 +948,11 @@ uv lock --check
 git diff --check
 ```
 
-`.github/workflows/ci.yml` 已在 Task 12.2 本地实现为两个独立 job：offline quality 和
-受保护的 PostgreSQL 17 + pgvector integration。当前改动尚未 commit/push，因此还没有
-包含该 workflow 的 GitHub Actions run；只有推送后观察到真实成功 run，才能添加 CI
-badge 或声称远端 CI 通过。本地普通测试不因 CI 文件存在而访问网络或真实 Provider。
+`.github/workflows/ci.yml` 包含两个独立 job：offline quality 和受保护的 PostgreSQL 17 +
+pgvector integration。checkpoint commit `b05adae` 对应的
+[GitHub Actions run 35097448961](https://github.com/foni-i/fastapi-learning-task-management-system/actions/runs/35097448961)
+已实际运行且两个 job 均成功；这只证明该 commit 的 workflow，不代表当前未提交修改、
+生产部署或真实 Provider 已通过。本地普通测试不因 CI 文件存在而访问网络或真实 Provider。
 
 Stage 7 的完整质量门禁是普通 pytest、显式 PostgreSQL integration pytest、OpenAPI 契约、Alembic迁移往返和head/drift、Ruff lint、Ruff format、mypy、lock check与diff check。SQLite不作为PostgreSQL integration行为的替代品。
 
@@ -1037,7 +1038,7 @@ Stage 8提供可替换Provider、版本化Prompt、严格结构化结果、Servi
 
 Stage 5的Refresh Token、轮换、退出登录和密码修改保留为非阻塞的延后认证增强轨道。Stage 11已经提供文档上传、私有解析、确定性分块、pgvector词法/向量RRF检索、受限于不可信数据边界和严格citation验证的Agent Grounding、不记录内容的有界Tracing，以及版本化离线评估、指标和安全门。当前尚未实现grounded claim事实核验或外部Tracing供应商。
 
-Stage 12.1 已提供可复现的一键 Compose 应用启动；Task 12.2 的两段式 GitHub Actions
-workflow 已在本地验证但尚未 commit/push，因此没有对应远端 run。当前 Task 12.3 只完善
-使用文档与合成演示资料；架构图、演示编排、安全/成本说明和求职材料仍由后续独立任务
-处理。MCP、多 Agent 与云部署均不在当前范围。
+Stage 12 已提供可复现的一键 Compose 应用启动、两段式 GitHub Actions、使用与架构文档、
+无 Provider 演示以及安全/成本说明。checkpoint commit `b05adae` 的真实远端 CI
+已通过；当前工作区中的文档事实更新不属于该远端 run。
+MCP、多 Agent、Version 2 与生产云部署均不在当前范围。

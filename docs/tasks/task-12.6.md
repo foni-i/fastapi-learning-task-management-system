@@ -3,10 +3,9 @@
 ## 状态
 
 - Completed（2026-09-07）
-- 验收依据：[roadmap Stage 12 的 Task 12.6 验收记录](../roadmap.md#stage-12--deployment-and-job-search-presentation)。最小测试 77 passed，普通测试 884 passed / 67 deselected，40 个证据路径存在，质量门通过；以下保留原始任务契约。
-- 所属 Stage：Stage 12 — Deployment and job-search presentation
+- 验收依据：[roadmap Stage 12 的 Task 12.6 验收记录](../roadmap.md#stage-12--deployment-and-engineering-presentation)。最小测试 77 passed，普通测试 884 passed / 67 deselected，40 个证据路径存在，质量门通过；以下保留原始任务契约。
+- 所属 Stage：Stage 12 — Deployment and engineering presentation
 - 前置 Task：Task 12.5（可复现演示和真实结果快照已验收）
-- 后续依赖：Task 12.7 从本 Task 提取诚实的取舍、安全回答和改进方向。
 
 ## 目标
 
@@ -65,7 +64,6 @@
 - 不运行 penetration test、负载测试、真实恶意文件、真实 Provider 或生产数据。
 - 不创建正式 SOC 2/ISO、隐私政策、法律合规或生产安全认证声明。
 - 不提交供应商账户、账单、API key 或真实成本记录。
-- 不撰写简历 bullet 或面试问答；属于 Task 12.7。
 
 ## 设计与接口约束
 
@@ -177,4 +175,4 @@ git diff --check
 - 最小测试与最终质量门；
 - 未解决问题；
 - 三个学习点；
-- 明确停止，未进入 Task 12.7。
+- 明确停止，未进入后续产品阶段。

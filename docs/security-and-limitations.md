@@ -2,9 +2,9 @@
 
 ## Status and interpretation
 
-This document describes the repository at Alembic head `e3b7c2d9a410` and the
-uncommitted Stage 11–12 implementation observed on 2026-09-07. It is an
-engineering disclosure for a learning and portfolio project, not a security
+This document describes the repository at Alembic head `e3b7c2d9a410`, including
+checkpoint commit `b05adae` and the documentation audit on 2026-09-16. It is an
+engineering disclosure for a learning project, not a security
 certification, privacy policy, compliance statement, production-readiness claim,
 or warranty.
 
@@ -42,7 +42,7 @@ results are in [`demo/README.md`](demo/README.md) and
 | **File is oversized, unsupported, encrypted, malformed, PostgreSQL-incompatible, or expensive to parse** | Upload returns bounded 413/422 errors and closes the upload | Pure ASGI chunk counting caps the pre-parser multipart body at 5 MiB + 64 KiB; endpoint/Service retain the 5 MiB file limit; page/text limits and strict media/extension checks remain; U+0000 is rejected from display names and every extracted-text path before persistence. Covered by [`tests/test_request_body_limit.py`](../tests/test_request_body_limit.py), [`tests/test_knowledge_document_api.py`](../tests/test_knowledge_document_api.py), and PostgreSQL integration tests | A proxy or server may buffer before ASGI receives data. No antivirus, content-disarm, parser sandbox, OCR, signature verification, or protection against an unknown parser vulnerability | **P0 proposal before untrusted public uploads:** edge request limits plus isolated scanning/parsing service and dependency vulnerability process |
 | **SSE reconnect uses an invalid or no-longer-retained cursor** | Request fails with bounded 409; valid cursor resumes after the exact retained event | Stable bounded event projection in [`app/services/agent_events.py`](../app/services/agent_events.py) and [`tests/test_agent_sse.py`](../tests/test_agent_sse.py) | This is a database-derived snapshot, not a durable event broker; retention is bounded and there is no delivery/SLA guarantee | **P2 proposal:** document retention and reconnect semantics; add a broker only if measured requirements justify it |
 | **Trace sink fails or receives unsafe content** | Sink failure is ignored and cannot change workflow outcome | Strict `agent-trace.v1` allowlist, metadata-only events, default no-op sink, and [`tests/test_agent_tracing.py`](../tests/test_agent_tracing.py) | Default tracing retains nothing, so production diagnosis is limited; no exporter, access policy, sampling, or retention proof | **P1 proposal:** privacy-reviewed exporter with access/retention controls and redaction tests |
-| **CI dependency/service failure or unsafe test target** | Job fails; migration guard rejects a non-dedicated target before migration | Locked dependencies, pinned action revisions, dedicated pgvector service, and explicit target validator in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and [`tests/integration/conftest.py`](../tests/integration/conftest.py) | Task 12.2 has no pushed remote run; no SAST, dependency review, image scan, secret scan, provenance, or branch-protection evidence | **P0 operational next step:** commit/push and observe the exact workflow; **P1 proposal:** add supply-chain/security checks based on threat model |
+| **CI dependency/service failure or unsafe test target** | Job fails; migration guard rejects a non-dedicated target before migration | Locked dependencies, pinned action revisions, dedicated pgvector service, explicit target validator in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and [`tests/integration/conftest.py`](../tests/integration/conftest.py), plus successful [run 35097448961](https://github.com/foni-i/fastapi-learning-task-management-system/actions/runs/35097448961) for checkpoint `b05adae` | One successful run is not an availability history; no SAST, dependency review, image scan, secret scan, provenance, or branch-protection evidence | **P1 proposal:** add supply-chain/security checks based on threat model and monitor repeated CI behavior |
 | **Synthetic evaluation passes but real behavior regresses** | Offline gate remains deterministic and may not detect real Provider or traffic-distribution failures | R6 `stage11-eval.v2` runs 30 stimuli through production goal/prompt, Provider contract, graph, Tool/citation validators, retrieval/grounding, and approval boundaries; expectations are judgment-only, mutation tests change real observations/metrics, and recovery evidence is a separate guarded PostgreSQL integration subset | Synthetic Provider/retrieval data still cannot establish model correctness, relevance, factuality, production latency/cost, multilingual breadth, load behavior, or an adversarial-parser guarantee; v1 is historical and self-attested several observations | **P1 proposal:** versioned real-model/human eval run outside ordinary CI with explicit privacy and cost approval |
 
 ## Security statement
@@ -108,8 +108,8 @@ properties, not absence of all vulnerabilities.
 - Checkpoints, run-scoped locks, and execution claims support tested recovery
   scenarios; they do not provide distributed exactly-once execution, make
   PostgreSQL highly available, or resolve every uncertain external outcome.
-- Local Compose and the unpushed workflow are reproducible engineering assets,
-  not evidence of a hardened production deployment or successful remote CI.
+- Local Compose and one successful checkpoint workflow are reproducible engineering
+  evidence, not evidence of a hardened production deployment or sustained CI reliability.
 
 ### Explicit non-guarantees
 
@@ -137,7 +137,6 @@ the roadmap.
 
 | Priority | Improvement | Dependency and classification |
 | --- | --- | --- |
-| P0 | Push the exact Task 12.2 workflow and observe a matching remote run | Operational completion of existing Stage 12 work; no claim until evidence exists |
 | P0 | Provide a bounded approval preview tied to the exact fingerprint | **Proposal** requiring a public API/product decision before meaningful human approval can be claimed |
 | P0 | Complete Refresh Token rotation, logout, password change, and revocation | Existing deferred Stage 5 roadmap |
 | P0 | Add production edge and operations controls: TLS termination, debug-off enforcement, managed secrets, safe global errors/logging, rate limiting, backup/restore drill | **Proposal** required before public deployment; each high-risk control should be a separate task |
@@ -211,8 +210,8 @@ ci_usage = quality_job_minutes + integration_job_minutes
 ```
 
 Billing depends on the repository plan, runner, concurrency, cache behavior, and
-current platform terms. There is no remote run yet, so this repository has no
-measured Task 12.2 CI duration or bill.
+current platform terms. Checkpoint run 35097448961 measured 1m02s for quality and
+47s for integration, but one run is not a stable duration or billing forecast.
 
 Knowledge storage grows approximately with document text, chunk count, 1536
 vector values per chunk, GIN/HNSW index overhead, and PostgreSQL maintenance
@@ -227,7 +226,7 @@ future exporter would add event-volume × retention and vendor-ingestion costs.
 - real document chunk/index size and HNSW build/query behavior;
 - checkpoint retention and database growth;
 - backup size, restore time, log retention, trace volume, and alerting cost;
-- CI duration after the workflow is committed and executed remotely.
+- CI duration distribution, cache behavior, and billed usage across repeated runs.
 
 These values require a defined workload and an authorized measurement plan; they
 cannot be inferred from the 30-case v2 synthetic contract baseline.
@@ -241,7 +240,8 @@ Task 12.5 recorded:
 - 48 passing Agent/RAG evidence tests and 28 passing offline-evaluation tests;
 - 884 passing ordinary tests with 67 integration/external cases deselected;
 - a 39/39 synthetic evaluation baseline and passing predeclared gate;
-- no real Provider call, remote CI run, destructive migration, or volume removal.
+- no real Provider call, destructive migration, or volume removal; remote CI was
+  not yet available at the time of that historical snapshot.
 
 These facts are reproducible through [`demo/README.md`](demo/README.md). They do
 not extend the guarantees beyond the exact environments and tests described.
@@ -253,3 +253,8 @@ integration tests supplied the separate recovery/idempotency evidence. The full
 ordinary suite passed 928 tests with 72 integration/external cases deselected.
 The v1 39-case result above remains a Task 12.5 historical snapshot, not current
 accuracy or recovery evidence.
+
+The later checkpoint commit `b05adae` has one matching successful remote run,
+[35097448961](https://github.com/foni-i/fastapi-learning-task-management-system/actions/runs/35097448961),
+whose quality and PostgreSQL integration jobs both passed. Later uncommitted
+documentation changes are not covered by that run.

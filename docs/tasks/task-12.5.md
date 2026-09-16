@@ -3,11 +3,10 @@
 ## 状态
 
 - Completed（2026-09-07）
-- 验收依据：[roadmap Stage 12 的 Task 12.5 验收记录](../roadmap.md#stage-12--deployment-and-job-search-presentation)及 [demo/results.md](../demo/results.md)。最小测试 46 passed，普通测试 884 passed / 67 deselected，质量门通过；以下保留原始任务契约。
-- 所属 Stage：Stage 12 — Deployment and job-search presentation
+- 验收依据：[roadmap Stage 12 的 Task 12.5 验收记录](../roadmap.md#stage-12--deployment-and-engineering-presentation)及 [demo/results.md](../demo/results.md)。最小测试 46 passed，普通测试 884 passed / 67 deselected，质量门通过；以下保留原始任务契约。
+- 所属 Stage：Stage 12 — Deployment and engineering presentation
 - 前置 Task：Task 12.4（README、演示资料、架构图均已验收）
-- 后续依赖：Task 12.6 引用本 Task 的真实失败证据和测量边界；Task 12.7 从本 Task
-  提取可证明的简历与面试成果。
+- 后续依赖：Task 12.6 引用本 Task 的真实失败证据和测量边界。
 
 ## 目标
 
@@ -75,7 +74,7 @@ CI/质量证据。同步给出简洁的屏幕录制脚本和一份带日期、�
 - 不把 synthetic eval 指标描述成真实模型准确率、事实正确性、SLA 或线上成本。
 - 不运行真实 Provider，除非执行该 Task 时 owner 单独明确授权网络、凭据和费用。
 - 不新增 demo 用户删除、数据库 reset、seed 表或后台任务。
-- 不撰写完整安全/改进/成本声明或简历 Q&A；属于 Task 12.6/12.7。
+- 不撰写完整安全/改进/成本声明；属于 Task 12.6。
 
 ## 设计与接口约束
 

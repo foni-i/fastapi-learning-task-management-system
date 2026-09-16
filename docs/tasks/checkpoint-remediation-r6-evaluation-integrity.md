@@ -77,7 +77,7 @@ runner 提供 observation。测试 fake 可以控制 Provider/embedding/clock/�
 - 不为了维持 39/39 修改 expectation 迎合实现结果；失败应暴露真实行为缺陷。
 - 不使用 hidden reasoning、完整 prompt/document/model payload 作为 report/baseline。
 - 不在 R6 重新设计 R5 approval recovery；发现 R5 缺陷应停止并回到独立 R5 correction。
-- 不增加 Stage 12.7 求职材料或改变 proposal preview P0。
+- 不改变 proposal preview P0。
 
 ## 预计修改文件
 
@@ -269,4 +269,4 @@ git diff --cached --check
 - 被降级/重命名的指标及依据；
 - integration、migration 和最终质量门；
 - 残余 synthetic/Provider 外推限制、数据流和三个学习点；
-- 明确停止，进入独立复审前不 commit、不 push、不开始 Task 12.7。
+- 明确停止，进入独立复审前不 commit、不 push、不开始后续产品阶段。

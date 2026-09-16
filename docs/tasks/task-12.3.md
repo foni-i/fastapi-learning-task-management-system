@@ -3,8 +3,8 @@
 ## 状态
 
 - Completed（2026-09-07）
-- 验收依据：[roadmap Stage 12 的 Task 12.3 验收记录](../roadmap.md#stage-12--deployment-and-job-search-presentation)。最小测试 26 passed，普通测试 884 passed / 67 deselected，质量门通过；以下保留原始任务契约。
-- 所属 Stage：Stage 12 — Deployment and job-search presentation
+- 验收依据：[roadmap Stage 12 的 Task 12.3 验收记录](../roadmap.md#stage-12--deployment-and-engineering-presentation)。最小测试 26 passed，普通测试 884 passed / 67 deselected，质量门通过；以下保留原始任务契约。
+- 所属 Stage：Stage 12 — Deployment and engineering presentation
 - 前置 Task：Task 12.2（GitHub Actions 本地实现和验证完成）
 - 后续依赖：Task 12.4 使用本 Task 确认的产品入口与术语；Task 12.5 复用本 Task
   的启动步骤、API 示例和合成资料。
@@ -69,7 +69,6 @@
 - 不生成架构图或 LangGraph 状态图；属于 Task 12.4。
 - 不编写录制脚本、视频或结果报告；属于 Task 12.5。
 - 不集中撰写失败模式、安全声明、价格或改进路线；属于 Task 12.6。
-- 不撰写简历和面试材料；属于 Task 12.7。
 - 不实现 refresh token、logout、密码修改、grounded claim 事实核验、外部 tracing、
   公共 search HTTP、MCP、多 Agent、云部署或 Version 2。
 

@@ -24,6 +24,8 @@ from app.models import (
     AgentRun,
     AgentThread,
     AgentToolExecution,
+    KnowledgeDocument,
+    KnowledgeDocumentChunk,
     Project,
     Task,
     User,
@@ -42,6 +44,8 @@ TASK_REVISION = "6e2f9a4c1b73"
 AGENT_RECORD_REVISION = "21ec26a7c672"
 AGENT_TOOL_EXECUTION_REVISION = "8b7d4e2f1a90"
 AGENT_TOOL_NAME_REVISION = "c4d8a1f6e205"
+KNOWLEDGE_DOCUMENT_REVISION = "d7a1e4c9b320"
+KNOWLEDGE_DOCUMENT_CHUNK_REVISION = "e3b7c2d9a410"
 DATABASE_PASSWORD = "test-only-password"
 VALID_DATABASE_URL = (
     f"postgresql+psycopg://test_user:{DATABASE_PASSWORD}@127.0.0.1:5432/test_database"
@@ -103,25 +107,24 @@ def test_alembic_configuration_loads_linear_product_migration_chain() -> None:
     assert Path(script_directory.dir).resolve() == ALEMBIC_DIRECTORY.resolve()
     assert ALEMBIC_VERSIONS_DIRECTORY.is_dir()
     revisions = list(script_directory.walk_revisions())
-    assert len(list(ALEMBIC_VERSIONS_DIRECTORY.glob("*.py"))) == 8
-    assert script_directory.get_heads() == [AGENT_TOOL_NAME_REVISION]
-    assert len(revisions) == 8
-    assert revisions[0].revision == AGENT_TOOL_NAME_REVISION
-    assert revisions[0].down_revision == AGENT_TOOL_EXECUTION_REVISION
-    assert revisions[1].revision == AGENT_TOOL_EXECUTION_REVISION
-    assert revisions[1].down_revision == AGENT_RECORD_REVISION
-    assert revisions[2].revision == AGENT_RECORD_REVISION
-    assert revisions[2].down_revision == TASK_REVISION
-    assert revisions[3].revision == TASK_REVISION
-    assert revisions[3].down_revision == PROJECT_REVISION
-    assert revisions[4].revision == PROJECT_REVISION
-    assert revisions[4].down_revision == EMAIL_UNIQUE_REVISION
-    assert revisions[5].revision == EMAIL_UNIQUE_REVISION
-    assert revisions[5].down_revision == USER_REVISION
-    assert revisions[6].revision == USER_REVISION
-    assert revisions[6].down_revision == BASELINE_REVISION
-    assert revisions[7].revision == BASELINE_REVISION
-    assert revisions[7].down_revision is None
+    assert len(list(ALEMBIC_VERSIONS_DIRECTORY.glob("*.py"))) == 10
+    assert script_directory.get_heads() == [KNOWLEDGE_DOCUMENT_CHUNK_REVISION]
+    assert len(revisions) == 10
+    expected_chain = (
+        (KNOWLEDGE_DOCUMENT_CHUNK_REVISION, KNOWLEDGE_DOCUMENT_REVISION),
+        (KNOWLEDGE_DOCUMENT_REVISION, AGENT_TOOL_NAME_REVISION),
+        (AGENT_TOOL_NAME_REVISION, AGENT_TOOL_EXECUTION_REVISION),
+        (AGENT_TOOL_EXECUTION_REVISION, AGENT_RECORD_REVISION),
+        (AGENT_RECORD_REVISION, TASK_REVISION),
+        (TASK_REVISION, PROJECT_REVISION),
+        (PROJECT_REVISION, EMAIL_UNIQUE_REVISION),
+        (EMAIL_UNIQUE_REVISION, USER_REVISION),
+        (USER_REVISION, BASELINE_REVISION),
+        (BASELINE_REVISION, None),
+    )
+    assert tuple((item.revision, item.down_revision) for item in revisions) == (
+        expected_chain
+    )
 
 
 def test_alembic_config_contains_no_database_url_or_password() -> None:
@@ -163,6 +166,8 @@ def test_offline_environment_uses_settings_and_base_metadata(
     assert captured_configuration["target_metadata"] is AgentRun.metadata
     assert captured_configuration["target_metadata"] is AgentApproval.metadata
     assert captured_configuration["target_metadata"] is AgentToolExecution.metadata
+    assert captured_configuration["target_metadata"] is KnowledgeDocument.metadata
+    assert captured_configuration["target_metadata"] is KnowledgeDocumentChunk.metadata
     assert set(Base.metadata.tables) == {
         "users",
         "projects",
@@ -171,6 +176,8 @@ def test_offline_environment_uses_settings_and_base_metadata(
         "agent_runs",
         "agent_approvals",
         "agent_tool_executions",
+        "knowledge_documents",
+        "knowledge_document_chunks",
     }
 
 

@@ -36,7 +36,7 @@ from app.schemas.task import (
     TaskUpdate,
 )
 
-FINAL_RESULT = """{"prompt_version":"study-plan.v1","status":"completed","plan":{"summary":"A bounded plan","steps":[{"step_key":"step_1","position":1,"title":"Study","description":"Complete the selected task","success_criteria":"The task is reviewed"}]}}"""
+FINAL_RESULT = """{"prompt_version":"study-plan.v2","status":"completed","plan":{"summary":"A bounded plan","steps":[{"step_key":"step_1","position":1,"title":"Study","description":"Complete the selected task","success_criteria":"The task is reviewed"}]}}"""
 
 
 class ScriptedProvider:

@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from time import monotonic
 from typing import Never
 from uuid import UUID
 
@@ -19,6 +20,13 @@ from app.agent.tools import (
     AgentWriteToolResult,
     execute_tool,
     validate_write_tool_result,
+)
+from app.agent.tracing import (
+    NOOP_TRACE_SINK,
+    TraceComponent,
+    TraceErrorCode,
+    TraceSink,
+    start_trace,
 )
 from app.core.exceptions import (
     AGENT_TOOL_RECONCILIATION_MESSAGE,
@@ -49,6 +57,7 @@ SessionFactory = Callable[[], Session]
 RepositoryFactory = Callable[[Session], AgentToolExecutionRepository]
 ApprovalRepositoryFactory = Callable[[Session], AgentRunRepository]
 Clock = Callable[[], datetime]
+TraceClock = Callable[[], float]
 ToolDispatcher = Callable[..., AgentToolResult]
 TaskLoader = Callable[[UUID, UUID, Session], PublicTask]
 
@@ -113,6 +122,8 @@ class AgentToolExecutionCoordinator:
         dispatcher: ToolDispatcher = execute_tool,
         task_loader: TaskLoader = get_owned_task,
         clock: Clock = utc_now,
+        trace_sink: TraceSink = NOOP_TRACE_SINK,
+        trace_clock: TraceClock = monotonic,
     ) -> None:
         self._run_id = run_id
         self._user_id = user_id
@@ -123,8 +134,42 @@ class AgentToolExecutionCoordinator:
         self._dispatcher = dispatcher
         self._task_loader = task_loader
         self._clock = clock
+        self._trace_sink = trace_sink
+        self._trace_clock = trace_clock
 
     def __call__(
+        self,
+        action: AgentProposedAction,
+        *,
+        revision: int,
+        proposal_fingerprint: str,
+        runtime_context: AgentRuntimeContext,
+    ) -> AgentWriteToolResult:
+        span = start_trace(
+            self._trace_sink,
+            run_id=self._run_id,
+            component=TraceComponent.TOOL,
+            name=action.tool_name.value,
+            clock=self._trace_clock,
+        )
+        try:
+            result = self._execute(
+                action,
+                revision=revision,
+                proposal_fingerprint=proposal_fingerprint,
+                runtime_context=runtime_context,
+            )
+        except Exception as exc:
+            span.fail(
+                TraceErrorCode.TOOL_EXECUTION_FAILED
+                if isinstance(exc, _PROVEN_NO_WRITE_ERRORS)
+                else TraceErrorCode.TOOL_EXECUTION_UNKNOWN
+            )
+            raise
+        span.finish()
+        return result
+
+    def _execute(
         self,
         action: AgentProposedAction,
         *,

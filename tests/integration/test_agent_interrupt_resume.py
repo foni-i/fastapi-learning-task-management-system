@@ -32,6 +32,7 @@ from app.schemas.agent_run import (
     AgentRunSnapshot,
     AgentRunStartRequest,
 )
+from app.schemas.knowledge_retrieval import KnowledgeSearchQuery, KnowledgeSearchResult
 from app.schemas.project import ProjectListResponse
 from app.schemas.task import (
     PublicTask,
@@ -111,6 +112,15 @@ class EmptyGateway(AgentToolGateway):
         return TaskListResponse(
             items=[], page=query.page, page_size=query.page_size, total=0, pages=0
         )
+
+    def search_knowledge(
+        self,
+        *,
+        user_id: UUID,
+        search_query: KnowledgeSearchQuery,
+    ) -> KnowledgeSearchResult:
+        del user_id, search_query
+        return KnowledgeSearchResult(items=())
 
     def create_task(
         self,
@@ -298,9 +308,10 @@ def test_authenticated_run_resumes_after_process_local_workflow_loss(
                     "decision": "APPROVED",
                 },
             )
-            assert duplicate.status_code == 409
+            assert duplicate.status_code == 200
+            assert duplicate.json() == approved.json()
 
-        assert workflow_factory.open_count == 2
+        assert workflow_factory.open_count == 3
         assert len(opened_sessions) == 4
         assert {id(item) for item in opened_sessions} == {
             id(item) for item in closed_sessions

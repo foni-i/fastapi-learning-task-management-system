@@ -203,6 +203,42 @@ def test_public_run_recovers_after_runtime_rebuild_and_streams_safe_history(
             assert revised["approval"]["revision"] == 1
             assert revised["approval"]["decision"] == "PENDING"
 
+            feedback_mismatch = client.post(
+                f"/api/v1/agent/runs/{run_id}/approval",
+                headers=_bearer(owner.id),
+                json={
+                    "revision": approval["revision"],
+                    "proposal_fingerprint": approval["proposal_fingerprint"],
+                    "decision": "REQUEST_CHANGES",
+                    "feedback": "Use a different revision",
+                },
+            )
+            assert feedback_mismatch.status_code == 409
+
+            fingerprint_mismatch = client.post(
+                f"/api/v1/agent/runs/{run_id}/approval",
+                headers=_bearer(owner.id),
+                json={
+                    "revision": approval["revision"],
+                    "proposal_fingerprint": "f" * 64,
+                    "decision": "REQUEST_CHANGES",
+                    "feedback": "Use a smaller plan",
+                },
+            )
+            assert fingerprint_mismatch.status_code == 409
+
+            foreign_approval = client.post(
+                f"/api/v1/agent/runs/{run_id}/approval",
+                headers=_bearer(other_user.id),
+                json={
+                    "revision": approval["revision"],
+                    "proposal_fingerprint": approval["proposal_fingerprint"],
+                    "decision": "REQUEST_CHANGES",
+                    "feedback": "Use a smaller plan",
+                },
+            )
+            assert foreign_approval.status_code == 404
+
             stale = client.post(
                 f"/api/v1/agent/runs/{run_id}/approval",
                 headers=_bearer(owner.id),
@@ -236,7 +272,8 @@ def test_public_run_recovers_after_runtime_rebuild_and_streams_safe_history(
                     "decision": "APPROVED",
                 },
             )
-            assert duplicate.status_code == 409
+            assert duplicate.status_code == 200
+            assert duplicate.json() == approved.json()
 
             stream = client.get(
                 f"/api/v1/agent/runs/{run_id}/events",
@@ -274,7 +311,7 @@ def test_public_run_recovers_after_runtime_rebuild_and_streams_safe_history(
             assert rejected.status_code == 200
             assert rejected.json()["run"]["status"] == "REJECTED"
 
-        assert len(runtime_factories) == 5
+        assert len(runtime_factories) == 6
         assert all(runtime.open_count == 1 for runtime in runtime_factories)
         assert {id(session) for session in opened} == {
             id(session) for session in closed

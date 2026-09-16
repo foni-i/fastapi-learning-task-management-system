@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.agent.context import AgentRuntimeContext
 from app.agent.state import AgentProposedAction, AgentWriteToolName
 from app.agent.tools import AgentToolGateway, AgentWriteToolResult
+from app.agent.tracing import NOOP_TRACE_SINK, TraceComponent, TracePhase, TraceSink
 from app.core.exceptions import (
     AgentToolReconciliationRequiredError,
     TaskNotFoundError,
@@ -26,6 +27,7 @@ from app.repositories.agent_tool_executions import AgentToolExecutionRepository
 from app.schemas.agent_tool import AgentToolMutationResult
 from app.schemas.task import PublicTask
 from app.services.agent_tool_executions import AgentToolExecutionCoordinator
+from tests.fakes.tracing import RecordingTraceSink
 
 
 class FakeSession:
@@ -172,6 +174,7 @@ def _coordinator(
     sessions: list[FakeSession],
     dispatcher: Callable[..., AgentWriteToolResult],
     loaded: PublicTask,
+    trace_sink: TraceSink = NOOP_TRACE_SINK,
 ) -> AgentToolExecutionCoordinator:
     def session_factory() -> Session:
         session = FakeSession()
@@ -194,6 +197,8 @@ def _coordinator(
         repository_factory=repository_factory,
         dispatcher=dispatcher,
         task_loader=task_loader,
+        trace_sink=trace_sink,
+        trace_clock=lambda: 1.0,
     )
 
 
@@ -259,6 +264,59 @@ def test_first_execution_is_claimed_and_completed_then_replayed_without_tool() -
     assert not hasattr(execution, "arguments")
     assert all(session.closed for session in sessions)
     assert all(session.rollbacks == 0 for session in sessions)
+
+
+def test_coordinator_emits_metadata_only_and_sink_failure_does_not_repeat_tool() -> (
+    None
+):
+    run_id, user_id = uuid4(), uuid4()
+    context = AgentRuntimeContext(user_id=user_id, write_tools_enabled=True)
+    result = _task()
+
+    for sink in (RecordingTraceSink(), RecordingTraceSink(fail=True)):
+        store: dict[tuple[object, ...], AgentToolExecution] = {}
+        sessions: list[FakeSession] = []
+        calls = 0
+
+        def dispatcher(*args: object, **kwargs: object) -> PublicTask:
+            nonlocal calls
+            calls += 1
+            return result
+
+        coordinator = _coordinator(
+            run_id=run_id,
+            user_id=user_id,
+            store=store,
+            sessions=sessions,
+            dispatcher=dispatcher,
+            loaded=result,
+            trace_sink=sink,
+        )
+        assert (
+            coordinator(
+                _action(),
+                revision=1,
+                proposal_fingerprint="a" * 64,
+                runtime_context=context,
+            )
+            == result
+        )
+        assert calls == 1
+        assert all(session.closed for session in sessions)
+        assert [session.commits for session in sessions] == [1, 1]
+        assert [session.rollbacks for session in sessions] == [0, 0]
+        if not sink.fail:
+            assert [event.phase for event in sink.events] == [
+                TracePhase.STARTED,
+                TracePhase.FINISHED,
+            ]
+            assert all(
+                event.component is TraceComponent.TOOL and event.name == "create_task"
+                for event in sink.events
+            )
+            serialized = "".join(event.model_dump_json() for event in sink.events)
+            assert "not persisted by audit" not in serialized
+            assert str(user_id) not in serialized
 
 
 def test_proven_failure_is_retryable_but_unknown_outcome_fails_closed() -> None:

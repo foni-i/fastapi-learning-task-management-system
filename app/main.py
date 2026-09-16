@@ -7,6 +7,11 @@ from fastapi.responses import JSONResponse
 
 from app.api.router import router as root_router
 from app.core.config import Settings, get_settings
+from app.middleware.request_body_limit import (
+    MULTIPART_ENVELOPE_BYTES,
+    UploadBodyLimitMiddleware,
+)
+from app.services.knowledge_documents import MAX_DOCUMENT_BYTES
 
 MASKED_SECRET = "**********"
 
@@ -62,6 +67,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.add_exception_handler(
         RequestValidationError,
         _request_validation_exception_handler,
+    )
+    application.add_middleware(
+        UploadBodyLimitMiddleware,
+        max_body_bytes=MAX_DOCUMENT_BYTES + MULTIPART_ENVELOPE_BYTES,
     )
     application.include_router(root_router)
 

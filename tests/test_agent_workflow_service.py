@@ -9,7 +9,12 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy.orm import Session
 
-from app.agent.graph import AgentWorkflow, AgentWorkflowProgress
+from app.agent.graph import (
+    AgentCheckpointInspection,
+    AgentCheckpointStatus,
+    AgentWorkflow,
+    AgentWorkflowProgress,
+)
 from app.agent.metrics import AgentRunMetrics, AgentRunOutcome
 from app.agent.nodes.approval import AgentApprovalInterrupt
 from app.agent.schemas import PlanningGoal
@@ -197,9 +202,13 @@ class ScriptedWorkflow:
         *,
         start: AgentWorkflowProgress | None = None,
         resume: AgentWorkflowProgress | None = None,
+        inspection: AgentCheckpointInspection | None = None,
+        continuation: AgentWorkflowProgress | None = None,
     ) -> None:
         self.start_result = start
         self.resume_result = resume
+        self.inspection_result = inspection
+        self.continuation_result = continuation
         self.thread_ids: list[UUID] = []
         self.responses: list[object] = []
 
@@ -217,6 +226,20 @@ class ScriptedWorkflow:
         self.responses.append(response)
         assert self.resume_result is not None
         return self.resume_result
+
+    def inspect_durable(self, *, thread_id: UUID) -> AgentCheckpointInspection:
+        self.thread_ids.append(thread_id)
+        if self.inspection_result is not None:
+            return self.inspection_result
+        return AgentCheckpointInspection(
+            AgentCheckpointStatus.PENDING_INTERRUPT,
+            approval=_pending().approval,
+        )
+
+    def continue_durable(self, *, thread_id: UUID) -> AgentWorkflowProgress:
+        self.thread_ids.append(thread_id)
+        assert self.continuation_result is not None
+        return self.continuation_result
 
 
 class UnavailableWorkflowContext(AbstractContextManager[AgentWorkflow]):
@@ -260,6 +283,11 @@ def _factory(
         yield cast(AgentWorkflow, workflow)
 
     return open_workflow
+
+
+@contextmanager
+def _recovery_lock(_session: Session, _run_id: UUID) -> Iterator[None]:
+    yield
 
 
 def _repo_factory(
@@ -380,8 +408,9 @@ def test_approve_and_reject_decide_once_then_resume(
         repository_factory=_repo_factory(repository),
         workflow_factory=_factory(workflow),
         clock=lambda: NOW,
+        recovery_lock_factory=_recovery_lock,
     )
-    assert workflow.thread_ids == [thread_id]
+    assert workflow.thread_ids == [thread_id, thread_id]
     assert result.run.status.value == terminal.value.upper()
     assert result.approval is not None
     assert result.approval.decision.value == decision.value
@@ -406,6 +435,7 @@ def test_request_changes_creates_next_pending_revision() -> None:
         workflow_factory=_factory(ScriptedWorkflow(resume=_pending(1, "b" * 64))),
         id_factory=_ids(uuid4()),
         clock=lambda: NOW,
+        recovery_lock_factory=_recovery_lock,
     )
     assert result.run.status.value == "PENDING_APPROVAL"
     assert result.approval is not None
@@ -442,13 +472,14 @@ def test_missing_provider_token_counts_persist_as_zero() -> None:
             )
         ),
         clock=lambda: NOW,
+        recovery_lock_factory=_recovery_lock,
     )
     assert result.run.metrics.input_tokens == 0
     assert result.run.metrics.output_tokens == 0
     assert result.run.metrics.total_tokens == 0
 
 
-def test_resume_infrastructure_failure_records_safe_terminal_run() -> None:
+def test_resume_infrastructure_failure_keeps_decision_recoverable() -> None:
     user_id, _thread_id, run_id, repository = _started()
     session = RecordingSession()
 
@@ -468,26 +499,23 @@ def test_resume_infrastructure_failure_records_safe_terminal_run() -> None:
             repository_factory=_repo_factory(repository),
             workflow_factory=unavailable,
             clock=lambda: NOW,
+            recovery_lock_factory=_recovery_lock,
         )
 
     assert repository.run is not None
-    assert repository.run.status == "FAILED"
-    assert repository.run.error_code == "AGENT_RESUME_FAILED"
+    assert repository.run.status == "RUNNING"
+    assert repository.run.error_code is None
     assert repository.approvals[0].decision == "APPROVED"
-    assert session.commits == 2
+    assert session.commits == 1
     assert session.rollbacks == 1
 
 
-@pytest.mark.parametrize("mutation", ["status", "decision", "fingerprint"])
-def test_duplicate_terminal_and_stale_approval_are_safe_conflicts(
-    mutation: str,
-) -> None:
+@pytest.mark.parametrize("mutation", ["status", "fingerprint"])
+def test_pending_status_and_stale_fingerprint_are_safe_conflicts(mutation: str) -> None:
     user_id, _thread_id, run_id, repository = _started()
     assert repository.run is not None
     if mutation == "status":
         repository.run.status = "SUCCEEDED"
-    elif mutation == "decision":
-        repository.approvals[0].decision = "APPROVED"
     payload_fingerprint = "b" * 64 if mutation == "fingerprint" else FINGERPRINT
     session = RecordingSession()
     with pytest.raises(AgentRunConflictError):
@@ -505,5 +533,182 @@ def test_duplicate_terminal_and_stale_approval_are_safe_conflicts(
                 Callable[[UUID], AbstractContextManager[AgentWorkflow]],
                 lambda _user_id: pytest.fail("must not resume"),
             ),
+            recovery_lock_factory=_recovery_lock,
         )
-    assert session.commits == session.rollbacks == 0
+    assert session.commits == 0
+    assert session.rollbacks == 1
+
+
+def test_same_terminal_submission_returns_snapshot_without_resume() -> None:
+    user_id, _thread_id, run_id, repository = _started()
+    assert repository.run is not None
+    approval = repository.approvals[0]
+    approval.decision = "APPROVED"
+    approval.decided_at = NOW
+    repository.run.status = "SUCCEEDED"
+    workflow = ScriptedWorkflow(
+        inspection=AgentCheckpointInspection(
+            AgentCheckpointStatus.TERMINAL,
+            output=_terminal(AgentTerminalStatus.SUCCEEDED).output,
+        )
+    )
+
+    result = submit_agent_approval(
+        run_id,
+        AgentApprovalSubmission(
+            revision=0,
+            proposal_fingerprint=FINGERPRINT,
+            decision=AgentApprovalSubmissionDecision.APPROVED,
+        ),
+        user_id,
+        cast(Session, RecordingSession()),
+        repository_factory=_repo_factory(repository),
+        workflow_factory=_factory(workflow),
+        recovery_lock_factory=_recovery_lock,
+        clock=lambda: NOW,
+    )
+
+    assert result.run.status.value == "SUCCEEDED"
+    assert workflow.responses == []
+
+
+def test_different_decided_submission_is_conflict_without_workflow() -> None:
+    user_id, _thread_id, run_id, repository = _started()
+    approval = repository.approvals[0]
+    approval.decision = "REJECTED"
+    approval.decided_at = NOW
+    assert repository.run is not None
+    repository.run.status = "RUNNING"
+
+    with pytest.raises(AgentRunConflictError):
+        submit_agent_approval(
+            run_id,
+            AgentApprovalSubmission(
+                revision=0,
+                proposal_fingerprint=FINGERPRINT,
+                decision=AgentApprovalSubmissionDecision.APPROVED,
+            ),
+            user_id,
+            cast(Session, RecordingSession()),
+            repository_factory=_repo_factory(repository),
+            workflow_factory=cast(
+                Callable[[UUID], AbstractContextManager[AgentWorkflow]],
+                lambda _user_id: pytest.fail("must not inspect or resume"),
+            ),
+            recovery_lock_factory=_recovery_lock,
+        )
+
+
+class SimulatedProcessTermination(BaseException):
+    """Escape ordinary Exception handlers at the exact post-commit seam."""
+
+
+def test_post_decision_commit_termination_recovers_with_same_submission() -> None:
+    user_id, thread_id, run_id, repository = _started()
+    submission = AgentApprovalSubmission(
+        revision=0,
+        proposal_fingerprint=FINGERPRINT,
+        decision=AgentApprovalSubmissionDecision.APPROVED,
+    )
+    first_session = RecordingSession()
+
+    with pytest.raises(SimulatedProcessTermination):
+        submit_agent_approval(
+            run_id,
+            submission,
+            user_id,
+            cast(Session, first_session),
+            repository_factory=_repo_factory(repository),
+            workflow_factory=cast(
+                Callable[[UUID], AbstractContextManager[AgentWorkflow]],
+                lambda _user_id: pytest.fail("fault occurs before workflow open"),
+            ),
+            recovery_lock_factory=_recovery_lock,
+            after_decision_commit=lambda: (_ for _ in ()).throw(
+                SimulatedProcessTermination()
+            ),
+            clock=lambda: NOW,
+        )
+
+    assert repository.run is not None
+    assert repository.run.status == "RUNNING"
+    assert repository.approvals[0].decision == "APPROVED"
+    assert first_session.commits == 1
+    assert first_session.rollbacks == 0
+
+    rebuilt = ScriptedWorkflow(resume=_terminal(AgentTerminalStatus.SUCCEEDED))
+    recovered = submit_agent_approval(
+        run_id,
+        submission,
+        user_id,
+        cast(Session, RecordingSession()),
+        repository_factory=_repo_factory(repository),
+        workflow_factory=_factory(rebuilt),
+        recovery_lock_factory=_recovery_lock,
+        clock=lambda: NOW,
+    )
+
+    assert recovered.run.status.value == "SUCCEEDED"
+    assert rebuilt.thread_ids == [thread_id, thread_id]
+    assert len(rebuilt.responses) == 1
+
+
+def test_continuable_checkpoint_uses_public_continuation_without_resume() -> None:
+    user_id, thread_id, run_id, repository = _started()
+    approval = repository.approvals[0]
+    approval.decision = "APPROVED"
+    approval.decided_at = NOW
+    assert repository.run is not None
+    repository.run.status = "RUNNING"
+    workflow = ScriptedWorkflow(
+        inspection=AgentCheckpointInspection(AgentCheckpointStatus.CONTINUABLE),
+        continuation=_terminal(AgentTerminalStatus.SUCCEEDED),
+    )
+
+    result = submit_agent_approval(
+        run_id,
+        AgentApprovalSubmission(
+            revision=0,
+            proposal_fingerprint=FINGERPRINT,
+            decision=AgentApprovalSubmissionDecision.APPROVED,
+        ),
+        user_id,
+        cast(Session, RecordingSession()),
+        repository_factory=_repo_factory(repository),
+        workflow_factory=_factory(workflow),
+        recovery_lock_factory=_recovery_lock,
+        clock=lambda: NOW,
+    )
+
+    assert result.run.status.value == "SUCCEEDED"
+    assert workflow.thread_ids == [thread_id, thread_id]
+    assert workflow.responses == []
+
+
+def test_inconsistent_checkpoint_fails_closed_without_raw_state() -> None:
+    user_id, _thread_id, run_id, repository = _started()
+    submission = AgentApprovalSubmission(
+        revision=0,
+        proposal_fingerprint=FINGERPRINT,
+        decision=AgentApprovalSubmissionDecision.APPROVED,
+    )
+    workflow = ScriptedWorkflow(
+        inspection=AgentCheckpointInspection(AgentCheckpointStatus.INCONSISTENT)
+    )
+
+    with pytest.raises(AgentWorkflowUnavailableError) as error:
+        submit_agent_approval(
+            run_id,
+            submission,
+            user_id,
+            cast(Session, RecordingSession()),
+            repository_factory=_repo_factory(repository),
+            workflow_factory=_factory(workflow),
+            recovery_lock_factory=_recovery_lock,
+            clock=lambda: NOW,
+        )
+
+    assert str(error.value) == AGENT_WORKFLOW_UNAVAILABLE_MESSAGE
+    assert "checkpoint" not in str(error.value).casefold()
+    assert repository.run is not None
+    assert repository.run.status == "RUNNING"

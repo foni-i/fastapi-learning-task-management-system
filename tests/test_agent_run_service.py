@@ -14,6 +14,7 @@ from app.core.exceptions import (
     AgentThreadNotFoundError,
 )
 from app.models.agent_run import AgentRun, AgentThread
+from app.repositories.agent_recovery import agent_recovery_lock_key
 from app.schemas.agent_run import AgentThreadCreate
 from app.services.agent_runs import (
     create_agent_run,
@@ -159,7 +160,7 @@ def test_create_thread_and_initial_run_use_one_transaction_and_trusted_ids() -> 
 
     assert repository.calls == [
         ("create_thread", (thread_id, user_id, "Learn graphs")),
-        ("create_run", (run_id, thread_id, user_id, "study-plan.v1")),
+        ("create_run", (run_id, thread_id, user_id, "study-plan.v2")),
     ]
     assert result.thread.id == thread_id
     assert result.run.id == run_id
@@ -223,7 +224,7 @@ def test_later_run_first_checks_owned_thread_and_uses_new_run_id() -> None:
 
     assert repository.calls == [
         ("get_thread", (thread_id, user_id)),
-        ("create_run", (run_id, thread_id, user_id, "study-plan.v1")),
+        ("create_run", (run_id, thread_id, user_id, "study-plan.v2")),
     ]
     assert result.id == run_id
     assert result.thread_id == thread_id
@@ -333,3 +334,14 @@ def test_service_source_does_not_call_graph_provider_tools_or_checkpointer() -> 
         "HTTPException",
     ):
         assert forbidden not in source
+
+
+def test_recovery_lock_key_uses_stable_complete_uuid_mapping() -> None:
+    assert (
+        agent_recovery_lock_key(UUID("00000000-0000-0000-0000-000000000000"))
+        == -7146144241358649407
+    )
+    assert (
+        agent_recovery_lock_key(UUID("ffffffff-ffff-ffff-ffff-ffffffffffff"))
+        == 8246188560930004617
+    )

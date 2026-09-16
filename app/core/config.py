@@ -14,6 +14,8 @@ MIN_ACCESS_TOKEN_TTL_MINUTES = 1
 MAX_ACCESS_TOKEN_TTL_MINUTES = 60
 MAX_MODEL_PROVIDER_LENGTH = 100
 MAX_MODEL_NAME_LENGTH = 200
+MIN_EMBEDDING_TIMEOUT_SECONDS = 0.1
+MAX_EMBEDDING_TIMEOUT_SECONDS = 120.0
 
 
 class AppEnvironment(StrEnum):
@@ -46,6 +48,8 @@ class Settings(BaseSettings):
     access_token_audience: str = "fastapi-stms-api"
     model_provider: str | None = None
     model_name: str | None = None
+    embedding_model: str | None = None
+    embedding_timeout_seconds: float = 30.0
     model_api_key: SecretStr | None = None
 
     @field_validator("model_provider")
@@ -62,7 +66,7 @@ class Settings(BaseSettings):
             raise ValueError("model provider is too long")
         return normalized
 
-    @field_validator("model_name")
+    @field_validator("model_name", "embedding_model")
     @classmethod
     def validate_model_name(cls, value: str | None) -> str | None:
         """Bound a configured model identifier without accepting blanks."""
@@ -75,6 +79,15 @@ class Settings(BaseSettings):
         if len(normalized) > MAX_MODEL_NAME_LENGTH:
             raise ValueError("model name is too long")
         return normalized
+
+    @field_validator("embedding_timeout_seconds")
+    @classmethod
+    def validate_embedding_timeout(cls, value: float) -> float:
+        """Keep synchronous embedding calls within one bounded request window."""
+
+        if not MIN_EMBEDDING_TIMEOUT_SECONDS <= value <= MAX_EMBEDDING_TIMEOUT_SECONDS:
+            raise ValueError("embedding timeout must be between 0.1 and 120 seconds")
+        return value
 
     @field_validator("model_api_key")
     @classmethod

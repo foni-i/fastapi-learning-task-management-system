@@ -5,8 +5,11 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from app.agent.embeddings import EmbeddingProvider, OpenAIEmbeddingProvider
+from app.core.config import get_settings
 from app.db.session import get_session_factory
 from app.schemas.agent_tool import AgentToolMutationResult
+from app.schemas.knowledge_retrieval import KnowledgeSearchQuery, KnowledgeSearchResult
 from app.schemas.project import ProjectListResponse
 from app.schemas.task import (
     PublicTask,
@@ -14,6 +17,11 @@ from app.schemas.task import (
     TaskListQuery,
     TaskListResponse,
     TaskUpdate,
+)
+from app.services.knowledge_retrieval import (
+    KNOWLEDGE_RETRIEVAL_MESSAGE,
+    KnowledgeRetrievalError,
+    search_owned_knowledge,
 )
 from app.services.projects import list_owned_projects
 from app.services.tasks import (
@@ -33,12 +41,24 @@ type CreateTaskService = Callable[..., PublicTask]
 type UpdateTaskService = Callable[..., PublicTask]
 type BatchCreateTasksService = Callable[..., tuple[PublicTask, ...]]
 type DeleteTaskService = Callable[..., None]
+type SearchKnowledgeService = Callable[..., KnowledgeSearchResult]
+type EmbeddingProviderFactory = Callable[[], EmbeddingProvider]
 
 
 def _new_session() -> Session:
     """Resolve the configured factory lazily when a valid tool is executed."""
 
     return get_session_factory()()
+
+
+def _new_embedding_provider() -> EmbeddingProvider:
+    settings = get_settings()
+    if settings.model_provider != "openai":
+        raise KnowledgeRetrievalError(KNOWLEDGE_RETRIEVAL_MESSAGE)
+    return OpenAIEmbeddingProvider(
+        api_key=settings.model_api_key,
+        model=settings.embedding_model,
+    )
 
 
 class AgentDomainGateway:
@@ -54,6 +74,9 @@ class AgentDomainGateway:
         update_task_service: UpdateTaskService = update_owned_task,
         batch_create_tasks_service: BatchCreateTasksService = create_task_batch,
         delete_task_service: DeleteTaskService = delete_owned_task,
+        search_knowledge_service: SearchKnowledgeService = search_owned_knowledge,
+        embedding_provider_factory: EmbeddingProviderFactory = _new_embedding_provider,
+        embedding_timeout_seconds: float | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._list_projects_service = list_projects_service
@@ -62,6 +85,9 @@ class AgentDomainGateway:
         self._update_task_service = update_task_service
         self._batch_create_tasks_service = batch_create_tasks_service
         self._delete_task_service = delete_task_service
+        self._search_knowledge_service = search_knowledge_service
+        self._embedding_provider_factory = embedding_provider_factory
+        self._embedding_timeout_seconds = embedding_timeout_seconds
 
     def list_projects(
         self,
@@ -96,6 +122,29 @@ class AgentDomainGateway:
         session = self._session_factory()
         try:
             return self._list_tasks_service(query, user_id, session)
+        finally:
+            session.close()
+
+    def search_knowledge(
+        self,
+        *,
+        user_id: UUID,
+        search_query: KnowledgeSearchQuery,
+    ) -> KnowledgeSearchResult:
+        """Search owned knowledge and always close the read-only Session."""
+
+        session = self._session_factory()
+        try:
+            timeout_seconds = self._embedding_timeout_seconds
+            if timeout_seconds is None:
+                timeout_seconds = get_settings().embedding_timeout_seconds
+            return self._search_knowledge_service(
+                search_query,
+                user_id,
+                session,
+                embedding_provider=self._embedding_provider_factory(),
+                timeout_seconds=timeout_seconds,
+            )
         finally:
             session.close()
 

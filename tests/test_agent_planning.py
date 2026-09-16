@@ -28,7 +28,7 @@ from app.core.exceptions import (
 )
 
 VALID_RESULT_JSON = """{
-  "prompt_version": "study-plan.v1",
+  "prompt_version": "study-plan.v2",
   "status": "completed",
   "plan": {
     "summary": "A safe plan",

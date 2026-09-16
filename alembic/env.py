@@ -8,14 +8,32 @@ from sqlalchemy import create_engine, pool
 from alembic import context
 from app.core.config import get_settings
 from app.db.session import DatabaseConfigurationError
-from app.models import Task
+from app.models import KnowledgeDocumentChunk
 
 config: Config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
-target_metadata = Task.metadata
+target_metadata = KnowledgeDocumentChunk.metadata
+
+
+def include_object(
+    object_: object,
+    name: str | None,
+    type_: str,
+    reflected: bool,
+    compare_to: object | None,
+) -> bool:
+    """Skip the generated search column Alembic cannot compare on PostgreSQL."""
+
+    del reflected, compare_to
+    table = getattr(object_, "table", None)
+    return not (
+        type_ == "column"
+        and name == "search_vector"
+        and getattr(table, "name", None) == "knowledge_document_chunks"
+    )
 
 
 def get_database_url() -> str:
@@ -38,6 +56,7 @@ def run_migrations_offline() -> None:
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
         compare_server_default=True,
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -55,6 +74,7 @@ def run_migrations_online() -> None:
                 target_metadata=target_metadata,
                 compare_type=True,
                 compare_server_default=True,
+                include_object=include_object,
             )
 
             with context.begin_transaction():

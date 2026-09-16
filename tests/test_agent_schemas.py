@@ -97,7 +97,7 @@ def test_result_has_an_explicit_public_field_allowlist() -> None:
 
 def test_result_rejects_unsupported_prompt_version_and_extra_fields() -> None:
     payload = _result().model_dump(mode="json")
-    payload["prompt_version"] = "study-plan.v2"
+    payload["prompt_version"] = "study-plan.v1"
 
     with pytest.raises(ValidationError, match="prompt version is unsupported"):
         PlanningResult.model_validate(payload)

@@ -110,11 +110,13 @@ def test_write_enabled_allowlist_is_exact_and_read_only_context_hides_writes() -
     assert tuple(item.name for item in available_tool_definitions(read_only)) == (
         "list_projects",
         "list_tasks",
+        "search_knowledge",
     )
     assert available_tool_definitions(writable) == TOOL_DEFINITIONS
     assert tuple(item.name for item in TOOL_DEFINITIONS) == (
         "list_projects",
         "list_tasks",
+        "search_knowledge",
         "create_task",
         "update_task",
         "batch_create_tasks",
@@ -129,7 +131,7 @@ def test_write_schemas_exactly_reuse_public_edit_fields_without_owner() -> None:
         "task_id",
     }
     write_definitions = {
-        definition.name: definition for definition in TOOL_DEFINITIONS[2:]
+        definition.name: definition for definition in TOOL_DEFINITIONS[3:]
     }
     write_properties: dict[str, set[str]] = {}
     for name, definition in write_definitions.items():

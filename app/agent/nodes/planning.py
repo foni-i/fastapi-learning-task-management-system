@@ -2,10 +2,12 @@
 
 from time import monotonic, sleep
 from typing import Never, TypedDict
+from uuid import UUID
 
 from pydantic import ValidationError
 
 from app.agent.context import AgentRuntimeContext
+from app.agent.grounding import GroundingValidationError, validate_citation_references
 from app.agent.metrics import AgentRunMetrics, AgentRunOutcome, build_run_metrics
 from app.agent.planning import (
     PLANNING_MAX_ATTEMPTS,
@@ -34,6 +36,13 @@ from app.agent.state import (
     fingerprint_plan_proposal,
 )
 from app.agent.tools import validate_tool_arguments
+from app.agent.tracing import (
+    NOOP_TRACE_SINK,
+    TraceComponent,
+    TraceErrorCode,
+    TraceSink,
+    start_trace,
+)
 from app.core.exceptions import (
     AGENT_PLANNING_CONFIGURATION_MESSAGE,
     AGENT_PLANNING_UNAVAILABLE_MESSAGE,
@@ -45,6 +54,7 @@ PLAN_CONTEXT_MISSING = "PLAN_CONTEXT_MISSING"
 PLAN_PROPOSAL_MISSING = "PLAN_PROPOSAL_MISSING"
 PLAN_PROPOSAL_INVALID = "PLAN_PROPOSAL_INVALID"
 PLAN_ACTION_INVALID = "PLAN_ACTION_INVALID"
+PLAN_CITATION_INVALID = "PLAN_CITATION_INVALID"
 
 
 class AgentPlanGenerationUpdate(TypedDict):
@@ -60,6 +70,22 @@ def _fail_unavailable() -> Never:
     raise AgentPlanningUnavailableError(AGENT_PLANNING_UNAVAILABLE_MESSAGE) from None
 
 
+def _provider_error_code(exc: Exception) -> TraceErrorCode:
+    if isinstance(exc, ProviderTimeoutError):
+        return TraceErrorCode.PROVIDER_TIMEOUT
+    if isinstance(exc, ProviderTransientError):
+        return TraceErrorCode.PROVIDER_TRANSIENT
+    if isinstance(exc, (ProviderInvalidResponseError, ValidationError)):
+        return TraceErrorCode.PROVIDER_INVALID_RESPONSE
+    if isinstance(exc, ProviderConfigurationError):
+        return TraceErrorCode.PROVIDER_CONFIGURATION
+    if isinstance(exc, ProviderAuthenticationError):
+        return TraceErrorCode.PROVIDER_AUTHENTICATION
+    if isinstance(exc, ProviderPermissionError):
+        return TraceErrorCode.PROVIDER_PERMISSION
+    return TraceErrorCode.PROVIDER_FAILURE
+
+
 def generate_plan(
     state: AgentGraphState,
     *,
@@ -67,6 +93,9 @@ def generate_plan(
     provider: ModelProvider,
     clock: Clock = monotonic,
     sleeper: Sleeper = sleep,
+    trace_sink: TraceSink = NOOP_TRACE_SINK,
+    trace_run_id: UUID | None = None,
+    trace_clock: Clock = monotonic,
 ) -> AgentPlanGenerationUpdate:
     """Generate one strict proposal without granting approval or executing it."""
 
@@ -95,6 +124,15 @@ def generate_plan(
         _fail_unavailable()
 
     for attempt in range(1, PLANNING_MAX_ATTEMPTS + 1):
+        span = start_trace(
+            trace_sink,
+            run_id=trace_run_id,
+            component=TraceComponent.PROVIDER,
+            name="model_provider",
+            prompt_version=request.prompt_version,
+            attempt=attempt,
+            clock=trace_clock,
+        )
         try:
             response = provider.generate(
                 request,
@@ -116,13 +154,19 @@ def generate_plan(
                 started_at=started_at,
                 finished_at=clock(),
             )
+            span.finish(
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                total_tokens=response.usage.total_tokens,
+            )
             return {"proposal": proposal, "metrics": metrics}
         except (
             ProviderTimeoutError,
             ProviderTransientError,
             ProviderInvalidResponseError,
             ValidationError,
-        ):
+        ) as exc:
+            span.fail(_provider_error_code(exc))
             if attempt == PLANNING_MAX_ATTEMPTS:
                 _fail_unavailable()
             sleeper(PLANNING_RETRY_DELAY_SECONDS)
@@ -130,11 +174,13 @@ def generate_plan(
             ProviderConfigurationError,
             ProviderAuthenticationError,
             ProviderPermissionError,
-        ):
+        ) as exc:
+            span.fail(_provider_error_code(exc))
             raise AgentPlanningConfigurationError(
                 AGENT_PLANNING_CONFIGURATION_MESSAGE
             ) from None
-        except Exception:
+        except Exception as exc:
+            span.fail(_provider_error_code(exc))
             _fail_unavailable()
     raise AssertionError("bounded plan proposal generation did not terminate")
 
@@ -166,6 +212,14 @@ def validate_plan(
         )
     except TypeError, ValueError, ValidationError:
         return _invalid(PLAN_PROPOSAL_INVALID, revision=state.revision_count)
+
+    try:
+        validate_citation_references(
+            tuple(step.citation_ids for step in proposal.planning_result.plan.steps),
+            state.context.knowledge,
+        )
+    except GroundingValidationError:
+        return _invalid(PLAN_CITATION_INVALID, revision=state.revision_count)
 
     try:
         for action in proposal.actions:

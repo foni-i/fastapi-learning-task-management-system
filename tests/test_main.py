@@ -30,6 +30,9 @@ def test_default_application_is_importable_with_basic_metadata() -> None:
         "/api/v1/agent/runs/{run_id}",
         "/api/v1/agent/runs/{run_id}/events",
         "/api/v1/agent/runs/{run_id}/approval",
+        "/api/v1/knowledge/documents",
+        "/api/v1/knowledge/documents/{document_id}",
+        "/api/v1/knowledge/documents/{document_id}/index",
     }
     assert set(paths["/api/v1/auth/login"]) == {"post"}
     assert set(paths["/api/v1/auth/register"]) == {"post"}
@@ -44,6 +47,9 @@ def test_default_application_is_importable_with_basic_metadata() -> None:
     assert set(paths["/api/v1/agent/runs/{run_id}"]) == {"get"}
     assert set(paths["/api/v1/agent/runs/{run_id}/events"]) == {"get"}
     assert set(paths["/api/v1/agent/runs/{run_id}/approval"]) == {"post"}
+    assert set(paths["/api/v1/knowledge/documents"]) == {"post"}
+    assert set(paths["/api/v1/knowledge/documents/{document_id}"]) == {"get"}
+    assert set(paths["/api/v1/knowledge/documents/{document_id}/index"]) == {"post"}
 
 
 def test_create_app_applies_explicit_settings() -> None:

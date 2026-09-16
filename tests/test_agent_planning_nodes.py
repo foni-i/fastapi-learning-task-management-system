@@ -2,21 +2,28 @@
 
 import json
 from collections.abc import Iterable
-from uuid import uuid4
+from datetime import UTC, date, datetime
+from uuid import UUID, uuid4
 
 import pytest
 
 from app.agent.context import AgentRuntimeContext
+from app.agent.grounding import GroundedKnowledgeContext, GroundingEvidence
 from app.agent.metrics import AgentRunMetrics
 from app.agent.nodes.context import analyze_goal
 from app.agent.nodes.planning import (
     PLAN_ACTION_INVALID,
+    PLAN_CITATION_INVALID,
     PLAN_CONTEXT_MISSING,
     PLAN_PROPOSAL_INVALID,
     generate_plan,
     validate_plan,
 )
 from app.agent.planning import PLANNING_MAX_ATTEMPTS, PLANNING_TIMEOUT_SECONDS
+from app.agent.prompt_budget import (
+    MAX_PROMPT_INPUT_CHARACTERS,
+    PROMPT_FINAL_SAFETY_MARGIN_CHARACTERS,
+)
 from app.agent.providers import (
     ProviderAuthenticationError,
     ProviderInvalidResponseError,
@@ -28,11 +35,14 @@ from app.agent.providers import (
 )
 from app.agent.schemas import STUDY_PLAN_PROMPT_VERSION, PlanningGoal
 from app.agent.state import (
+    AgentContextKind,
     AgentContextSnapshot,
+    AgentGoalAnalysis,
     AgentGraphState,
     AgentPlanProposal,
     AgentPlanValidation,
     AgentValidationStatus,
+    fingerprint_plan_proposal,
 )
 from app.core.exceptions import (
     AGENT_PLANNING_CONFIGURATION_MESSAGE,
@@ -40,12 +50,15 @@ from app.core.exceptions import (
     AgentPlanningConfigurationError,
     AgentPlanningUnavailableError,
 )
+from app.models.task import TaskPriority, TaskStatus
 from app.schemas.project import ProjectListResponse
-from app.schemas.task import TaskListResponse
+from app.schemas.task import PublicTask, TaskListResponse
 
 
 def _proposal_payload(
     actions: list[dict[str, object]] | None = None,
+    *,
+    citation_ids: list[str] | None = None,
 ) -> dict[str, object]:
     return {
         "planning_result": {
@@ -60,6 +73,7 @@ def _proposal_payload(
                         "title": "Read",
                         "description": "Read one chapter",
                         "success_criteria": "Notes exist",
+                        "citation_ids": citation_ids or [],
                     }
                 ],
             },
@@ -140,6 +154,79 @@ def test_generate_plan_requests_exact_schema_and_returns_safe_metrics() -> None:
     assert metrics.provider_attempt_count == 1
     assert metrics.total_tokens == 30
     assert metrics.latency_ms == 250.0
+
+
+def test_generate_plan_budgets_maximum_public_tasks_before_provider() -> None:
+    now = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    goal = PlanningGoal(
+        objective="目" * 2_000,
+        constraints=tuple("限" * 500 for _ in range(20)),
+    )
+    analysis = AgentGoalAnalysis(
+        objective=goal.objective,
+        constraints=goal.constraints,
+        required_context=(
+            AgentContextKind.PROJECTS,
+            AgentContextKind.TASKS,
+            AgentContextKind.KNOWLEDGE,
+        ),
+    )
+    tasks = [
+        PublicTask(
+            id=UUID(int=index + 1),
+            project_id=UUID(int=100 + index),
+            title="学" * 300,
+            description="据" * 5_000,
+            status=TaskStatus.IN_PROGRESS,
+            priority=TaskPriority.HIGH,
+            planned_date=date(2026, 1, 1),
+            due_at=now,
+            estimated_minutes=1_440,
+            completed_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+        for index in range(20)
+    ]
+    state = AgentGraphState(
+        goal=goal,
+        analysis=analysis,
+        context=AgentContextSnapshot(
+            projects=ProjectListResponse(
+                items=[], page=1, page_size=20, total=0, pages=0
+            ),
+            tasks=TaskListResponse(
+                items=tasks,
+                page=1,
+                page_size=20,
+                total=20,
+                pages=1,
+            ),
+        ),
+        approval_feedback="改" * 1_000,
+    )
+    provider = RecordingProvider([_response()])
+
+    generated = generate_plan(
+        state,
+        model="synthetic-model",
+        provider=provider,
+    )
+
+    request, _timeout = provider.requests[0]
+    assert len(request.input) <= (
+        MAX_PROMPT_INPUT_CHARACTERS - PROMPT_FINAL_SAFETY_MARGIN_CHARACTERS
+    )
+    assert '"truncation"' in request.input
+    proposed = state.model_copy(update=generated)
+    validation = validate_plan(
+        proposed,
+        runtime_context=AgentRuntimeContext(user_id=uuid4()),
+    )["validation"]
+    assert validation.status is AgentValidationStatus.VALID
+    assert validation.proposal_fingerprint == fingerprint_plan_proposal(
+        generated["proposal"]
+    )
 
 
 def test_generate_and_validate_one_to_three_write_actions() -> None:
@@ -280,7 +367,7 @@ def test_missing_context_and_tampered_proposal_fail_with_stable_codes() -> None:
     tampered = valid.model_copy(
         update={
             "planning_result": valid.planning_result.model_copy(
-                update={"prompt_version": "study-plan.v2"}
+                update={"prompt_version": "study-plan.v999"}
             )
         }
     )
@@ -290,6 +377,88 @@ def test_missing_context_and_tampered_proposal_fail_with_stable_codes() -> None:
         runtime_context=AgentRuntimeContext(user_id=uuid4(), write_tools_enabled=True),
     )
     assert invalid["validation"].error_code == PLAN_PROPOSAL_INVALID
+
+
+def test_citations_validate_before_approval_and_bind_proposal_fingerprint() -> None:
+    document_id, chunk_id, other_chunk_id = uuid4(), uuid4(), uuid4()
+    citation_id = f"knowledge:{document_id}:{chunk_id}"
+    other_citation_id = f"knowledge:{document_id}:{other_chunk_id}"
+    evidence = tuple(
+        GroundingEvidence(
+            citation_id=current_id,
+            document_id=document_id,
+            chunk_id=current_chunk_id,
+            source="notes.txt",
+            page_number=1,
+            ordinal=index,
+            excerpt="bounded evidence",
+            lexical_rank=index + 1,
+            fusion_score=1 / (61 + index),
+        )
+        for index, (current_id, current_chunk_id) in enumerate(
+            ((citation_id, chunk_id), (other_citation_id, other_chunk_id))
+        )
+    )
+    ready = _ready_state()
+    assert ready.context is not None
+    ready = ready.model_copy(
+        update={
+            "context": ready.context.model_copy(
+                update={"knowledge": GroundedKnowledgeContext(evidence=evidence)}
+            )
+        }
+    )
+
+    valid_proposal = AgentPlanProposal.model_validate(
+        _proposal_payload(citation_ids=[citation_id])
+    )
+    valid_state = ready.model_copy(update={"proposal": valid_proposal})
+    valid = validate_plan(
+        valid_state,
+        runtime_context=AgentRuntimeContext(user_id=uuid4(), write_tools_enabled=True),
+    )["validation"]
+    assert valid.status is AgentValidationStatus.VALID
+    assert valid.proposal_fingerprint == fingerprint_plan_proposal(valid_proposal)
+
+    changed = AgentPlanProposal.model_validate(
+        _proposal_payload(citation_ids=[other_citation_id])
+    )
+    assert fingerprint_plan_proposal(changed) != fingerprint_plan_proposal(
+        valid_proposal
+    )
+
+    normalized_first = AgentPlanProposal.model_validate(
+        _proposal_payload(citation_ids=[citation_id, other_citation_id])
+    )
+    normalized_second = AgentPlanProposal.model_validate(
+        _proposal_payload(citation_ids=[other_citation_id, citation_id])
+    )
+    assert normalized_first == normalized_second
+    assert fingerprint_plan_proposal(normalized_first) == fingerprint_plan_proposal(
+        normalized_second
+    )
+
+    for references in ([], [f"knowledge:{uuid4()}:{uuid4()}"]):
+        proposal = AgentPlanProposal.model_validate(
+            _proposal_payload(citation_ids=references)
+        )
+        validation = validate_plan(
+            ready.model_copy(update={"proposal": proposal}),
+            runtime_context=AgentRuntimeContext(
+                user_id=uuid4(), write_tools_enabled=True
+            ),
+        )["validation"]
+        assert validation.status is AgentValidationStatus.INVALID
+        assert validation.error_code == PLAN_CITATION_INVALID
+
+    fabricated_without_evidence = AgentPlanProposal.model_validate(
+        _proposal_payload(citation_ids=[citation_id])
+    )
+    validation = validate_plan(
+        _ready_state().model_copy(update={"proposal": fabricated_without_evidence}),
+        runtime_context=AgentRuntimeContext(user_id=uuid4(), write_tools_enabled=True),
+    )["validation"]
+    assert validation.error_code == PLAN_CITATION_INVALID
 
 
 @pytest.mark.parametrize(

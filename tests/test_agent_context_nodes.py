@@ -10,6 +10,7 @@ from app.agent.nodes.context import (
     AGENT_CONTEXT_UNAVAILABLE_MESSAGE,
     CONTEXT_PAGE,
     CONTEXT_PAGE_SIZE,
+    KNOWLEDGE_TOP_K,
     AgentContextUnavailableError,
     analyze_goal,
     load_context,
@@ -22,13 +23,15 @@ from app.agent.state import (
     AgentGraphState,
 )
 from app.agent.tools import AgentToolGateway, AgentToolResult
+from app.schemas.knowledge_retrieval import KnowledgeCitation, KnowledgeSearchResult
 from app.schemas.project import ProjectListResponse
 from app.schemas.task import TaskListResponse
 
 
 class RecordingExecutor:
-    def __init__(self) -> None:
+    def __init__(self, knowledge: KnowledgeSearchResult | None = None) -> None:
         self.calls: list[tuple[str, dict[str, object], AgentRuntimeContext]] = []
+        self.knowledge = knowledge or KnowledgeSearchResult(items=())
 
     def __call__(
         self,
@@ -56,6 +59,8 @@ class RecordingExecutor:
                 total=0,
                 pages=0,
             )
+        if name == "search_knowledge":
+            return self.knowledge
         raise AssertionError("context node requested a write or unknown tool")
 
 
@@ -83,6 +88,7 @@ def test_analyze_goal_is_deterministic_and_updates_only_analysis() -> None:
     assert analysis.required_context == (
         AgentContextKind.PROJECTS,
         AgentContextKind.TASKS,
+        AgentContextKind.KNOWLEDGE,
     )
     assert "reasoning" not in analysis.model_dump_json()
 
@@ -107,13 +113,21 @@ def test_load_context_uses_exact_read_tools_bounds_and_trusted_identity() -> Non
     assert isinstance(snapshot, AgentContextSnapshot)
     assert snapshot.projects.items == []
     assert snapshot.tasks.items == []
-    assert [call[0] for call in executor.calls] == ["list_projects", "list_tasks"]
+    assert [call[0] for call in executor.calls] == [
+        "list_projects",
+        "list_tasks",
+        "search_knowledge",
+    ]
     assert executor.calls[0][1] == {
         "page": 1,
         "page_size": 20,
         "include_archived": False,
     }
     assert executor.calls[1][1] == {"page": 1, "page_size": 20}
+    assert executor.calls[2][1] == {
+        "query": "Learn transaction boundaries",
+        "top_k": KNOWLEDGE_TOP_K,
+    }
     assert all(call[2].user_id == user_id for call in executor.calls)
     assert all(not call[2].write_tools_enabled for call in executor.calls)
     assert state.model_dump_json() == original
@@ -213,3 +227,32 @@ def test_runtime_identity_never_enters_serialized_context_update() -> None:
 
     assert str(user_id) not in serialized
     assert "user_id" not in serialized
+
+
+def test_load_context_stores_only_bounded_public_search_evidence() -> None:
+    document_id, chunk_id = uuid4(), uuid4()
+    citation = KnowledgeCitation(
+        citation_id=f"knowledge:{document_id}:{chunk_id}",
+        document_id=document_id,
+        chunk_id=chunk_id,
+        source="notes.txt",
+        page_number=None,
+        ordinal=0,
+        distance=None,
+        vector_rank=None,
+        lexical_rank=1,
+        fusion_score=1 / 61,
+        excerpt="hostile text remains data",
+    )
+    update = load_context(
+        _analyzed_state(),
+        runtime_context=AgentRuntimeContext(user_id=uuid4()),
+        executor=RecordingExecutor(KnowledgeSearchResult(items=(citation,))),
+    )
+
+    snapshot = update["context"]
+    assert isinstance(snapshot, AgentContextSnapshot)
+    assert snapshot.knowledge.evidence[0].citation_id == citation.citation_id
+    serialized = snapshot.model_dump_json()
+    for forbidden in ("distance", "embedding", "search_vector", "sql", "user_id"):
+        assert forbidden not in serialized.lower()

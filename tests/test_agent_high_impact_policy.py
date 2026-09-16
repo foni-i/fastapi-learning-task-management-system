@@ -67,6 +67,7 @@ def test_high_impact_policy_and_expanded_allowlist_are_exact_and_code_owned() ->
     assert tuple(item.name for item in TOOL_DEFINITIONS) == (
         "list_projects",
         "list_tasks",
+        "search_knowledge",
         "create_task",
         "update_task",
         "batch_create_tasks",

@@ -1,11 +1,13 @@
 """Strict serializable contracts for Stage 8 study planning."""
 
 from enum import StrEnum
-from typing import Self
+from typing import Annotated, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-STUDY_PLAN_PROMPT_VERSION = "study-plan.v1"
+from app.agent.grounding import CITATION_ID_PATTERN, MAX_CITATIONS_PER_CLAIM
+
+STUDY_PLAN_PROMPT_VERSION = "study-plan.v2"
 
 
 def _bounded_text(value: object, *, field_name: str, maximum: int) -> object:
@@ -57,6 +59,9 @@ class StudyPlanStep(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     description: str = Field(min_length=1, max_length=1000)
     success_criteria: str = Field(min_length=1, max_length=500)
+    citation_ids: tuple[
+        Annotated[str, Field(pattern=CITATION_ID_PATTERN, max_length=100)], ...
+    ] = Field(default=(), max_length=MAX_CITATIONS_PER_CLAIM)
 
     @field_validator("title", "description", "success_criteria", mode="before")
     @classmethod
@@ -66,6 +71,13 @@ class StudyPlanStep(BaseModel):
             field_name
         ]
         return _bounded_text(value, field_name=field_name, maximum=maximum)
+
+    @field_validator("citation_ids")
+    @classmethod
+    def require_unique_citations(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("Plan step citations must be unique")
+        return tuple(sorted(value))
 
 
 class StudyPlan(BaseModel):

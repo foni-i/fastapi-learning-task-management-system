@@ -47,6 +47,8 @@ def test_task_enums_and_exact_columns() -> None:
         "agent_runs",
         "agent_approvals",
         "agent_tool_executions",
+        "knowledge_documents",
+        "knowledge_document_chunks",
     }
 
 

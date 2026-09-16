@@ -17,6 +17,8 @@ PRODUCT_TABLES = {
     "agent_runs",
     "agent_approvals",
     "agent_tool_executions",
+    "knowledge_documents",
+    "knowledge_document_chunks",
 }
 
 

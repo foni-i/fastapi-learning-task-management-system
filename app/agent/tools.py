@@ -16,6 +16,7 @@ from app.agent.context import AgentRuntimeContext
 from app.agent.policy import HIGH_IMPACT_TOOL_NAMES
 from app.agent.providers import ProviderToolDefinition
 from app.schemas.agent_tool import AgentToolMutationResult
+from app.schemas.knowledge_retrieval import KnowledgeSearchQuery, KnowledgeSearchResult
 from app.schemas.project import ProjectListResponse
 from app.schemas.task import (
     TASK_UPDATE_EMPTY_MESSAGE,
@@ -51,6 +52,12 @@ class ListProjectsToolArguments(BaseModel):
 
 class ListTasksToolArguments(TaskListQuery):
     """Reuse the existing bounded Task query contract without identity input."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+
+class SearchKnowledgeToolArguments(KnowledgeSearchQuery):
+    """Expose only bounded search text, result count, and document filters."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
@@ -110,12 +117,17 @@ class DeleteTaskToolArguments(BaseModel):
 
 
 type AgentToolResult = (
-    ProjectListResponse | TaskListResponse | PublicTask | AgentToolMutationResult
+    ProjectListResponse
+    | TaskListResponse
+    | KnowledgeSearchResult
+    | PublicTask
+    | AgentToolMutationResult
 )
 type AgentWriteToolResult = PublicTask | AgentToolMutationResult
 type AgentToolArguments = (
     ListProjectsToolArguments
     | ListTasksToolArguments
+    | SearchKnowledgeToolArguments
     | CreateTaskToolArguments
     | UpdateTaskToolArguments
     | BatchCreateTasksToolArguments
@@ -176,7 +188,18 @@ class HighImpactAgentToolGateway(Protocol):
     ) -> AgentToolMutationResult: ...
 
 
-READ_TOOL_NAMES = ("list_projects", "list_tasks")
+class KnowledgeSearchAgentToolGateway(Protocol):
+    """Expose retrieval only at the validated search dispatch branch."""
+
+    def search_knowledge(
+        self,
+        *,
+        user_id: UUID,
+        search_query: KnowledgeSearchQuery,
+    ) -> KnowledgeSearchResult: ...
+
+
+READ_TOOL_NAMES = ("list_projects", "list_tasks", "search_knowledge")
 
 READ_TOOL_DEFINITIONS = (
     ProviderToolDefinition(
@@ -190,6 +213,14 @@ READ_TOOL_DEFINITIONS = (
             "List the authenticated user's tasks with bounded filters and sorting."
         ),
         input_schema=ListTasksToolArguments.model_json_schema(),
+    ),
+    ProviderToolDefinition(
+        name="search_knowledge",
+        description=(
+            "Search indexed documents owned by the authenticated user using bounded "
+            "semantic similarity."
+        ),
+        input_schema=SearchKnowledgeToolArguments.model_json_schema(),
     ),
 )
 
@@ -257,6 +288,12 @@ def execute_tool(
         )
     if isinstance(validated, ListTasksToolArguments):
         return runtime_gateway.list_tasks(user_id=context.user_id, query=validated)
+    if isinstance(validated, SearchKnowledgeToolArguments):
+        search_gateway = cast(KnowledgeSearchAgentToolGateway, runtime_gateway)
+        return search_gateway.search_knowledge(
+            user_id=context.user_id,
+            search_query=KnowledgeSearchQuery.model_validate(validated.model_dump()),
+        )
     if isinstance(validated, CreateTaskToolArguments):
         return runtime_gateway.create_task(
             user_id=context.user_id,
@@ -315,6 +352,8 @@ def validate_tool_arguments(
             validated = ListProjectsToolArguments.model_validate(arguments)
         elif name == "list_tasks":
             validated = ListTasksToolArguments.model_validate(arguments)
+        elif name == "search_knowledge":
+            validated = SearchKnowledgeToolArguments.model_validate(arguments)
         elif name == "create_task":
             validated = CreateTaskToolArguments.model_validate(arguments)
         elif name == "update_task":

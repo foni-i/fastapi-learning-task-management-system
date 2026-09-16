@@ -15,6 +15,7 @@ from pydantic import (
     model_validator,
 )
 
+from app.agent.grounding import GroundedKnowledgeContext
 from app.agent.metrics import AgentRunMetrics
 from app.agent.schemas import PlanningGoal, PlanningResult
 from app.schemas.agent_tool import AgentToolMutationResult
@@ -58,6 +59,7 @@ def _bounded_text(value: object, *, label: str, maximum: int) -> object:
 class AgentContextKind(StrEnum):
     PROJECTS = "projects"
     TASKS = "tasks"
+    KNOWLEDGE = "knowledge"
 
 
 class AgentWriteToolName(StrEnum):
@@ -104,7 +106,7 @@ class AgentGoalAnalysis(_FrozenContract):
     constraints: tuple[str, ...] = Field(default=(), max_length=20)
     required_context: tuple[AgentContextKind, ...] = Field(
         min_length=1,
-        max_length=2,
+        max_length=3,
     )
 
     @field_validator("objective", mode="before")
@@ -130,10 +132,13 @@ class AgentGoalAnalysis(_FrozenContract):
 
 
 class AgentContextSnapshot(_FrozenContract):
-    """Keep only existing public owner-scoped list responses."""
+    """Keep bounded public owner-scoped context and retrieved evidence."""
 
     projects: ProjectListResponse
     tasks: TaskListResponse
+    knowledge: GroundedKnowledgeContext = Field(
+        default_factory=GroundedKnowledgeContext
+    )
 
 
 class AgentProposedAction(_FrozenContract):

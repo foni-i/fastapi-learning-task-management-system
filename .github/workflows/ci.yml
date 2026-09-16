@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Offline tests and quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python and uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.10"
+          python-version: "3.14"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Check lock file
+        run: uv lock --check
+
+      - name: Install locked dependencies
+        run: uv sync --locked --all-groups
+
+      - name: Run ordinary tests
+        run: uv run pytest
+
+      - name: Run Ruff lint
+        run: uv run ruff check .
+
+      - name: Check Ruff formatting
+        run: uv run ruff format --check .
+
+      - name: Run mypy
+        run: uv run mypy app tests
+
+  integration:
+    name: PostgreSQL integration and migrations
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      STMS_ACCESS_TOKEN_SECRET: ci-test-only-not-for-production-0123456789
+      STMS_POSTGRES_TEST_PORT: "5433"
+      STMS_TEST_DATABASE_URL: postgresql+psycopg://stms_test@127.0.0.1:5433/stms_test
+    services:
+      postgres-test:
+        image: pgvector/pgvector:0.8.6-pg17-bookworm
+        env:
+          POSTGRES_DB: stms_test
+          POSTGRES_USER: stms_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U stms_test -d stms_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python and uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.10"
+          python-version: "3.14"
+          enable-cache: true
+          save-cache: false
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install locked dependencies
+        run: uv sync --locked --all-groups
+
+      - name: Validate migration target
+        env:
+          STMS_DATABASE_URL: ${{ env.STMS_TEST_DATABASE_URL }}
+        run: >-
+          uv run python -c "import os;
+          from tests.integration.conftest import validate_migration_test_target;
+          validate_migration_test_target(os.environ.get('STMS_DATABASE_URL'))"
+
+      - name: Check migrations
+        env:
+          STMS_DATABASE_URL: ${{ env.STMS_TEST_DATABASE_URL }}
+        run: |
+          uv run alembic upgrade head
+          uv run alembic current
+          uv run alembic heads
+          uv run alembic check
+
+      - name: Run integration tests
+        run: uv run pytest -m "integration and not external_provider" tests/integration

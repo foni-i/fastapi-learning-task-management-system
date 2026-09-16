@@ -1,14 +1,43 @@
 name: fastapi-stms
 
 services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      STMS_ENV: development
+      STMS_DEBUG: "false"
+      STMS_API_DOCS_ENABLED: "true"
+      STMS_DATABASE_URL: postgresql+psycopg://${STMS_POSTGRES_DEV_USER:-stms_dev}:${STMS_POSTGRES_DEV_PASSWORD:-stms_dev_local}@postgres-dev:5432/${STMS_POSTGRES_DEV_DB:-stms}
+      # Passed through only when explicitly set in the shell or an uncommitted .env.
+      STMS_ACCESS_TOKEN_SECRET:
+    ports:
+      - "127.0.0.1:${STMS_APP_PORT:-8000}:8000"
+    depends_on:
+      postgres-dev:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+    stop_grace_period: 30s
+
   postgres-dev:
-    image: postgres:17.6-bookworm
+    image: pgvector/pgvector:0.8.6-pg17-bookworm
     environment:
       POSTGRES_DB: ${STMS_POSTGRES_DEV_DB:-stms}
       POSTGRES_USER: ${STMS_POSTGRES_DEV_USER:-stms_dev}
       POSTGRES_PASSWORD: ${STMS_POSTGRES_DEV_PASSWORD:-stms_dev_local}
     ports:
-      - "${STMS_POSTGRES_DEV_PORT:-5432}:5432"
+      - "127.0.0.1:${STMS_POSTGRES_DEV_PORT:-5432}:5432"
     volumes:
       - postgres-dev-data:/var/lib/postgresql/data
     healthcheck:
@@ -22,13 +51,13 @@ services:
     stop_grace_period: 30s
 
   postgres-test:
-    image: postgres:17.6-bookworm
+    image: pgvector/pgvector:0.8.6-pg17-bookworm
     environment:
       POSTGRES_DB: ${STMS_POSTGRES_TEST_DB:-stms_test}
       POSTGRES_USER: ${STMS_POSTGRES_TEST_USER:-stms_test}
       POSTGRES_PASSWORD: ${STMS_POSTGRES_TEST_PASSWORD:-stms_test_local}
     ports:
-      - "${STMS_POSTGRES_TEST_PORT:-5433}:5432"
+      - "127.0.0.1:${STMS_POSTGRES_TEST_PORT:-5433}:5432"
     tmpfs:
       - /var/lib/postgresql/data
     healthcheck:

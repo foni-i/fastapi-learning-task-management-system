@@ -127,10 +127,13 @@ SQLAlchemy are outside this stage. Each task below is time-boxed to approximatel
 
 ### Environment gate and task order
 
-The Stage 2 planning check found that `docker` is not currently on `PATH` in the
-Windows environment. Tasks 2.1 through 2.3 can be completed and fully accepted
-without Docker because they do not open a database connection. Before Task 2.4,
-install and start Docker Desktop, then verify all of the following:
+The Stage 2 planning check could not invoke `docker` directly from the Codex
+sandbox. Later diagnosis confirmed that Docker Desktop was installed and usable
+through its absolute executable path in an allowed environment; this was a
+sandbox access/command-resolution limitation, not an absent local Docker CLI.
+Tasks 2.1 through 2.3 can be completed and fully accepted without Docker because
+they do not open a database connection. Before Task 2.4, start Docker Desktop,
+then verify all of the following:
 
 ```powershell
 docker --version
@@ -608,8 +611,9 @@ work. No registration task may pre-implement a later-stage capability.
 
 Each task below is sized for approximately 1–2 focused hours and ends with a
 review stop. Use the absolute Docker executable documented in the README when
-Docker is unavailable on `PATH`. Replace database URL placeholders locally and
-never paste credentials into command output, logs, tests, or commits.
+the Codex sandbox cannot resolve or execute `docker` directly. Replace database
+URL placeholders locally and never paste credentials into command output, logs,
+tests, or commits.
 
 ### Task 3.1 — User ORM model and reversible migration
 
@@ -4478,6 +4482,12 @@ versus public schema. **Stop boundary:** Stop before chunks or embeddings.
 
 ### Task 11.2 — Deterministic chunking, embedding port, and pgvector storage
 
+**Acceptance status (2026-09-06):** Accepted on the dedicated PostgreSQL 17
+`postgres-test` service with pgvector 0.8.6. Migration upgrade/check and the
+`d7a1e4c9b320` downgrade/re-upgrade round trip passed; PostgreSQL catalog checks
+proved `vector(1536)`, generated `tsvector`, GIN, HNSW cosine, and owner-scoped
+constraints, and the complete integration suite passed.
+
 **Estimated time:** 1–2 focused hours. **Migration:** exactly one reversible
 pgvector/chunk revision based on the Task 11.1 head. **Real PostgreSQL:** required;
 external Provider access is not.
@@ -4529,6 +4539,13 @@ vector-index migrations. **Stop boundary:** Stop before retrieval.
 
 ### Task 11.3 — Owner-filtered vector retrieval and search Tool
 
+**Acceptance status (2026-09-06):** Accepted on the dedicated PostgreSQL 17
+`postgres-test` service. Real pgvector cosine queries proved owner and optional
+document filters, bounded results, and stable chunk-ID tie breaking even when a
+foreign owner's chunk was closer; the complete integration and ordinary quality
+gates passed without a migration, dependency, HTTP endpoint, or external model
+call.
+
 **Estimated time:** 1–2 focused hours. **Migration/dependency:** none. **Real
 PostgreSQL:** required for distance and ownership behavior.
 
@@ -4568,6 +4585,12 @@ retrieval Tools. **Stop boundary:** Stop before hybrid fusion and prompt use.
 
 ### Task 11.4 — Hybrid retrieval, deterministic ranking, and citations
 
+**Acceptance status (2026-09-06):** Accepted on the dedicated PostgreSQL 17
+`postgres-test` service. Separate owner-filtered simple full-text and pgvector
+candidate queries, fixed-constant RRF, stable chunk-ID ties, document filters,
+and cross-owner isolation passed focused and complete test suites without a
+migration, dependency, external model call, or prompt/state integration.
+
 **Estimated time:** 1–2 focused hours. **Migration/dependency:** none. **Real
 PostgreSQL:** required.
 
@@ -4601,6 +4624,13 @@ excerpt maps to one stable source; no unmeasured reranker dependency is added.
 verification. **Stop boundary:** Stop before Agent prompt/state integration.
 
 ### Task 11.5 — Grounded context and prompt-injection boundaries
+
+**Acceptance status (2026-09-07):** Accepted with offline deterministic fakes.
+The graph loads owner-scoped knowledge only through `search_knowledge`, stores at
+most ten serializable public excerpts, renders a versioned 12,000-character
+untrusted-data boundary, and validates every model citation before approval.
+The final cited proposal is covered by the existing canonical approval
+fingerprint; no migration, dependency, external call, or tracing was added.
 
 **Estimated time:** 1–2 focused hours. **Migration/dependency:** none. **Real
 PostgreSQL:** not required for ordinary acceptance.
@@ -4638,6 +4668,13 @@ fail closed; adversarial content remains data and cannot change policy.
 serializable RAG state. **Stop boundary:** Stop before tracing/evaluation.
 
 ### Task 11.6 — Safe Agent tracing and bounded observability
+
+**Acceptance status (2026-09-07):** Accepted with offline deterministic fakes.
+The graph, node, Provider-attempt, read Tool, and durable Tool coordinator
+boundaries emit strict `agent-trace.v1` allowlisted metadata through an injectable
+synchronous sink. The default sink retains nothing, sink failures cannot affect
+control flow or transactions, and traces remain absent from product audit, SSE,
+checkpoints, database schema, and public APIs.
 
 **Estimated time:** 1–2 focused hours. **Migration/dependency/PostgreSQL:** none.
 
@@ -4699,6 +4736,13 @@ compare normalized output, then security and ordinary quality gates.
 **Acceptance criteria:** A clean checkout runs 30–50 cases offline with identical
 ordered evidence and no key, sensitive payload, network request, or write.
 
+**Acceptance status:** Implemented with 39 synthetic `stage11-eval.v1` JSONL
+cases spanning every declared category. The strict loader continues after an
+invalid row using only a safe case ID; the injected offline runner emits stable,
+bounded evidence and aggregate fact counts. Deterministic fakes and a dry-run
+Tool recorder provide zero network, database, and real-write paths. Scoring,
+thresholds, and baselines remain deferred to Task 11.8.
+
 **Learning points:** Versioned eval contracts; reproducible dependency injection;
 deterministic checks versus model judging. **Stop boundary:** Stop before scoring.
 
@@ -4743,6 +4787,14 @@ documents cannot affect policy; owner filtering, citations, recovery/idempotency
 tracing redaction, migrations, and Stage 1–10 regressions pass without external
 Provider or sensitive input.
 
+**Acceptance status (2026-09-07):** Implemented with strict
+`stage11-metrics.v1`, `stage11-gate.v1`, and `stage11-baseline.v1` contracts.
+Predeclared thresholds, explicit zero-denominator and missing-usage behavior,
+six-place half-up rounding, and nearest-rank latency percentiles are covered by
+offline tests. The dedicated PostgreSQL 17 `postgres-test` catalog, complete
+integration suite, and `c4d8a1f6e205` downgrade/re-upgrade round trip verify the
+Stage 11 storage, owner isolation, retrieval, grounding, and migration boundary.
+
 **Learning points:** Metric denominators; offline safety release gates; consistency
 across RAG storage, policy, observability, and migrations.
 
@@ -4752,12 +4804,247 @@ not begin Stage 12, call a real Provider, expose MCP, or add multi-agent behavio
 ### Stage 12 — Deployment and job-search presentation
 
 - **Task 12.1:** Application service in Docker Compose and one-command startup.
+  **Acceptance status (2026-09-07):** Accepted with a pinned Python 3.14/uv
+  image, frozen production dependency install, non-root runtime, fail-fast
+  Alembic-before-Uvicorn startup, and `/health/ready` Compose healthcheck. The
+  real one-command build/start and restart checks passed against only
+  `postgres-dev`; `postgres-test` remained stopped and the development named
+  volume was preserved. Compose contains no JWT fallback secret; authenticated
+  use requires explicit shell or uncommitted `.env` injection.
 - **Task 12.2:** GitHub Actions for tests, integration safety, Ruff, mypy, and lock.
+  **Implementation status (2026-09-07):** Added an uncommitted two-job workflow
+  for offline quality checks and a guarded, dedicated PostgreSQL 17 + pgvector
+  integration service. Local static and ordinary quality checks pass. Docker was
+  re-confirmed through its absolute executable path as Client/Server 29.7.2,
+  Docker Desktop 4.87.0, `desktop-linux`, and Compose v5.4.0; direct sandbox
+  failures are access limitations, not a missing installation. This repository
+  is already linked to GitHub, but the Task 12.2 files have not been committed or
+  pushed, so no GitHub Actions run includes this workflow yet.
 - **Task 12.3:** Complete README, `.env.example`, API examples, and demo data.
+  **Acceptance status (2026-09-07):** Accepted with distinct local uv and
+  one-command Compose paths, a complete existing-variable configuration table,
+  contract-checked PowerShell/curl examples for the public HTTP flows, and a
+  1,657-byte synthetic Markdown syllabus accepted by the existing parser as
+  `text/markdown`. Documentation explicitly separates the locally verified,
+  unpushed Task 12.2 workflow from a future remote GitHub Actions run. Focused
+  tests passed 26/26; the final ordinary suite passed 884 tests with 67 marked
+  integration/external cases deselected, followed by Ruff, format, mypy, lock,
+  and diff checks. No Docker, database, network, or real Provider was used.
 - **Task 12.4:** System architecture and LangGraph state diagrams.
+  **Acceptance status (2026-09-07):** Accepted with six GitHub-renderable
+  Mermaid diagrams and text alternatives covering Compose/CI isolation, HTTP
+  layering, the Agent Tool boundary, RAG and grounding, the exact eight-node
+  approval graph, and separation of product audit, checkpoint, SSE, tracing,
+  and offline evaluation. The data table matches the nine current product ORM
+  tables and migration head `e3b7c2d9a410`; all 29 referenced paths exist.
+  Focused graph/state/retrieval contracts passed 41/41, followed by Ruff,
+  format, mypy, lock, and diff checks. No Docker, PostgreSQL, network, Provider,
+  runtime code, schema, migration, dependency, or Task 12.3 artifact changed.
 - **Task 12.5:** Reproducible demo/recording and test/evaluation results.
+  **Acceptance status (2026-09-07):** Accepted with a no-Provider default
+  runbook, an eight-minute recording checklist, and a dated bounded results
+  snapshot. A real Compose build reached healthy app/PostgreSQL 17.11, and the
+  public synthetic flow returned 200 for live/ready/OpenAPI/login/current-user
+  and 201 for registration/Project/Task creation without printing credentials
+  or tokens. Agent/RAG and offline-eval evidence passed 48/48 and 28/28; the
+  focused set passed 46/46 and the final ordinary suite passed 884 tests with
+  67 integration/external cases deselected. Ruff, format, mypy, lock, and diff
+  checks passed. App and postgres-dev were stopped, the named volume remained,
+  postgres-test stayed stopped, and no Provider, destructive migration, remote
+  CI, commit, or push was used.
 - **Task 12.6:** Failure cases, improvements, security statement, and cost notes.
+  **Acceptance status (2026-09-07):** Accepted with an evidence-linked register
+  of 18 failure modes, explicit proved/best-effort/non-guaranteed security
+  classifications, a dependency-ordered P0–P3 improvement route, and formula-
+  based local/Provider/CI/storage cost boundaries without unstable supplier
+  prices. The disclosure calls out the missing bounded approval preview, lack of
+  refresh/logout/rate limiting/production operations, citation truth limits,
+  parser exposure, unpushed CI, and synthetic-eval extrapolation limits. All 40
+  referenced evidence paths exist, secret patterns were absent, focused safety
+  tests passed 77/77, and the final ordinary suite passed 884 tests with 67
+  integration/external cases deselected, followed by Ruff, format, mypy, lock,
+  and diff checks. No runtime behavior, Docker, database, Provider, network,
+  migration, dependency, commit, or push was used.
 - **Task 12.7:** Resume description and interview question/answer checklist.
+
+### Checkpoint remediation before Task 12.7
+
+**Status:** R1 through R6 completed local verification and were followed by the
+owner's instruction to proceed between each remediation. The owner accepted R6
+by authorizing the next gate, and the independent pre-commit review of the
+combined Stage 11 through Task 12.6 candidate checkpoint completed on
+2026-09-16 with no P0, P1, or P2 blocker. Checkpoint commit and push remain
+pending explicit owner authorization. These six tasks are corrective gates for
+that checkpoint, not new numbered Stage 12 features.
+They do not renumber, implement, or change the scope of Task 12.7, and they do
+not implement the separately unscheduled approval-preview P0.
+
+- **R1 — CI runtime parity:** Add an explicitly test-only, job-scoped synthetic
+  `STMS_ACCESS_TOKEN_SECRET` to the integration job; prove the no-secret failure,
+  the configured 66-test integration pass, the static workflow contract, and
+  that the offline quality job receives no unnecessary sensitive configuration.
+  Plan: [checkpoint-remediation-r1-ci-runtime.md](tasks/checkpoint-remediation-r1-ci-runtime.md).
+  **Local acceptance status (2026-09-12):** Completed. Without the signing value,
+  the exact integration selection exited 1 with 47 passed and 19 authentication-
+  configuration failures. With the workflow's test-only job-scoped value, the
+  same selection passed 66/66. The focused contract set passed 40 tests, and the
+  final ordinary suite passed 885 tests with 67 integration/external cases
+  deselected. Ruff, formatting, mypy, lock, staged/unstaged diff, and bounded
+  secret-pattern checks passed. The pre-existing staged candidate fingerprint
+  remained unchanged. No commit, push, or remote GitHub Actions run occurred.
+- **R2 — Compose network boundary:** Bind app, postgres-dev, and postgres-test to
+  `127.0.0.1` by default while preserving port variables; require any remote
+  exposure to use an explicit additional override and verify both parsed Compose
+  configuration and runtime port bindings. Plan:
+  [checkpoint-remediation-r2-compose-network.md](tasks/checkpoint-remediation-r2-compose-network.md).
+  **Local acceptance status (2026-09-12):** Completed. Compose JSON parsing proves `host_ip` is
+  `127.0.0.1` for all three services at default ports 8000/5432/5433 and overrides
+  18000/15432/15433. Actual healthy postgres-test runs proved one IPv4 loopback
+  binding at both 5433 and 15433; its default 5433 configuration was restored
+  and the service stopped. The two parser tests executed (no skips): focused
+  tests passed 5/5, and the full ordinary suite passed 887 with 67 deselected.
+  Lock, Ruff, format, mypy, Compose config, and staged/unstaged diff checks passed.
+  After explicit owner authorization, Compose recreated app and postgres-dev
+  while retaining `fastapi-stms-postgres-dev-data`. Runtime inspection proved
+  loopback-only bindings at 8000 and 5432, Uvicorn retained its container-internal
+  `0.0.0.0:8000` listener, and live/ready both returned 200. The development
+  migration revision and every table count matched the pre-recreation snapshot
+  (including one user, one project, and one task). Both services were then
+  stopped; postgres-test remained stopped and no volume was deleted. The initial
+  `--build` attempt could not reach GHCR, so runtime verification used the
+  existing application image; R2 changes no image content. No commit, push, or
+  remote GitHub Actions run occurred. The owner then instructed work to proceed
+  to R3.
+- **R3 — Ingestion boundaries:** Add a pure ASGI streaming total-body limit before
+  multipart parsing without rejecting a legal 5 MiB file, retain endpoint/service
+  content checks, and reject U+0000 from every upload-derived PostgreSQL text
+  entry before persistence. Plan:
+  [checkpoint-remediation-r3-ingestion-boundaries.md](tasks/checkpoint-remediation-r3-ingestion-boundaries.md).
+  **Local acceptance status (2026-09-12):** Completed. A path- and method-specific
+  pure ASGI limiter now counts actual receive chunks before multipart parsing and
+  caps the full request body at 5 MiB plus a tested fixed 64 KiB envelope. Direct
+  ASGI coverage proves trusted-length early rejection, missing/malformed/
+  conflicting/underreported length handling, multi-chunk stopping before the
+  overflow chunk reaches downstream, one safe 413 response, non-target
+  transparency, and room for a 5 MiB file with maximum legal metadata. Endpoint
+  and Service file limits remain, and display-name, TXT, Markdown, per-page PDF,
+  and final extracted-text paths reject U+0000 with a fixed 422 before Repository
+  construction. The focused suite passed 40/40; guarded postgres-test migrations
+  reached the single head with no drift, and the full non-provider integration
+  selection passed 67/67, including no invalid row and a successful subsequent
+  request. One later isolated-file rerun immediately after restarting the tmpfs-
+  backed test service correctly failed because that restart had cleared every
+  table; rerunning the migration guard and upgrade on the fresh instance restored
+  the expected 12/12 knowledge-document pass. The ordinary suite passed 903 with
+  68 integration/external cases deselected. Lock, Ruff, format, mypy, and
+  staged/unstaged diff checks passed;
+  no migration, dependency, commit, push, or remote GitHub Actions run occurred.
+  The owner accepted R3 and instructed work to proceed to R4.
+- **R4 — Deterministic prompt budget:** Budget the final serialized prompt across
+  framing, goal/analysis, feedback, Projects, Tasks, and grounding; preserve
+  latest/relevant data with deterministic Unicode-safe truncation and an explicit
+  truncation manifest while retaining the 20,000-character schema limit. Plan:
+  [checkpoint-remediation-r4-prompt-budget.md](tasks/checkpoint-remediation-r4-prompt-budget.md).
+  **Local acceptance status (2026-09-13):** Completed. A pre-change maximum-
+  schema reproduction reached `VersionedPrompt.input` with `string_too_long`.
+  The final builder now applies centralized allocations of 1,000 framing/
+  manifest, 4,000 goal/analysis, 1,100 feedback, 3,000 Projects, 5,000 Tasks,
+  5,000 grounding, and an unallocated 900-character safety margin. It removes
+  duplicated goal/analysis values, preserves stable identity/order before
+  descriptions/excerpts, reclaims unused capacity in the fixed goal → Tasks →
+  Projects → grounding order, and records every truncation/omission in a bounded
+  manifest. Unicode tests cover CJK, combining marks, variation selectors, ZWJ,
+  and long no-space input; JSON escape expansion is measured after serialization.
+  The maximum combined legal Pydantic context produced the same 18,577-character
+  input twice, leaving 1,423 characters below the unchanged 20,000 limit. The
+  focused suite passed 32/32, the broader graph/approval/state/trace regression
+  passed 85/85, and the ordinary suite passed 911 with 68 integration/external
+  cases deselected. Lock, Ruff, format, mypy, and staged/unstaged diff checks
+  passed. The trusted instructions, `study-plan.v2` output/fingerprint contract,
+  dependencies, database schema, and migrations did not change. No Provider or
+  network call, commit, push, or remote GitHub Actions run occurred. The owner
+  accepted R4 and instructed work to proceed to R5.
+- **R5 — Durable approval recovery:** Resolve the product-commit/checkpoint-resume
+  crash window. The plan compares an outbox with an idempotent recovery protocol
+  and selects the latter, using existing durable approval intent, run-scoped
+  PostgreSQL locking, public checkpoint inspection, and existing Tool execution
+  idempotency. Locked-version LangGraph continuation behavior is an implementation
+  gate; failure stops for a renewed architecture decision. Plan:
+  [checkpoint-remediation-r5-approval-recovery.md](tasks/checkpoint-remediation-r5-approval-recovery.md).
+  **Local acceptance status (2026-09-13):** Completed. The implementation retained
+  the selected idempotent recovery protocol instead of adding an outbox, migration,
+  worker, or queue. Against LangGraph 1.2.11, langgraph-checkpoint 4.2.0, and
+  langgraph-checkpoint-postgres 3.1.2, the workflow facade classifies only public
+  `StateSnapshot` fields as pending interrupt, continuable, terminal, or
+  inconsistent; durable advances use synchronous checkpoint durability, and a
+  real interrupted graph proved public `invoke(None, config)` continuation. Each
+  approval recovery holds a PostgreSQL transaction advisory lock derived
+  deterministically from the complete run UUID on a dedicated connection, with
+  collisions limited to safe over-serialization. Exact persisted decision,
+  fingerprint, and normalized feedback retries recover or return the stored
+  terminal snapshot; mismatches conflict, foreign ownership remains hidden, and
+  inconsistent checkpoints fail closed without exposing raw state. PostgreSQL
+  fault tests proved recovery after the decision commit and after checkpoint
+  advancement, two competing same-run submissions, response-loss replay, and one
+  high-impact domain write. The focused unit suite passed 63/63, the four-file
+  recovery integration selection passed 9/9, the complete non-external-provider
+  integration suite passed 71/71, and the ordinary suite passed 918 tests with 72
+  cases deselected. The migration target guard passed; Alembic current and heads
+  both reported `e3b7c2d9a410`, and check reported no new upgrade operations.
+  Lock, Ruff, format, mypy, and staged/unstaged diff checks passed. Validation used
+  only guarded `postgres-test`; no real Provider or remote network call, schema
+  change, dependency change, commit, push, or remote GitHub Actions run occurred.
+  The owner accepted R5 by instructing work to proceed to R6; no commit or push
+  occurred.
+- **R6 — Evaluation integrity:** Run synthetic stimuli through real prompt, graph,
+  validation, Tool, grounding, approval, recovery, and idempotency paths with
+  injected fakes; derive observations only from actual results and keep
+  expectations solely for judgment. R6 follows R5 so recovery metrics evaluate
+  the final protocol. Plan:
+  [checkpoint-remediation-r6-evaluation-integrity.md](tasks/checkpoint-remediation-r6-evaluation-integrity.md).
+  **Local acceptance status (2026-09-16):** Completed. A pre-change v1 mutation
+  reproduced the defect: replacing a hostile case's input left its observation
+  unchanged. The immutable v1 artifacts remain as explicitly historical evidence;
+  the new `stage11-eval.v2`, `stage11-metrics.v2`, `stage11-gate.v2`, and
+  `stage11-baseline.v2` contracts contain 30 synthetic cases whose input reaches
+  production goal/prompt or owner-scoped retrieval/grounding. The Provider fake
+  receives a real `ProviderRequest`; raw responses pass through production schema,
+  graph, Tool argument, citation, and durable approval paths. Expectations are
+  used only for final comparison, Provider usage comes from actual responses, and
+  latency comes from injected clock calls. Reversing an expectation changed only
+  judgment; changing the hostile delimiter input changed the observed boundary
+  result and reduced its metric numerator from 3/3 to 2/3. Two independent fast
+  runs produced byte-equivalent normalized reports and baselines; the committed
+  30/30 baseline passed every predeclared contract threshold with zero unintended
+  writes. `extraction_exact_match` was replaced by the accurately scoped
+  `goal_propagation_accuracy`; recovery and duplicate claims were removed from the
+  fast gate. Guarded PostgreSQL cases `recovery-post-commit` and
+  `recovery-competing-high-impact` derive bounded observations from public
+  checkpoint state and test-owned product/audit rows. The focused suite passed
+  78/78, the complete non-external-provider integration suite passed 71/71, and
+  the ordinary suite passed 928 tests with 72 cases deselected. The migration
+  target guard passed; pre- and post-integration Alembic current/heads reported
+  `e3b7c2d9a410`, and check found no new upgrade operations. Lock, Ruff, format,
+  mypy, staged/unstaged diff, and bounded sensitive-pattern checks passed. A host
+  AF_UNIX failure required preserving two Docker runtime directories as backups
+  and restarting Windows; the Docker engine then recovered, the development named
+  volume remained present, and only `postgres-test` was started and stopped. No
+  real Provider/network call, dependency/schema change, commit, push, remote
+  GitHub Actions run, independent re-review, or Task 12.7 work occurred.
+
+The fixed gate order is:
+
+```text
+R1 → R2 → R3 → R4 → R5 → R6
+→ independent pre-commit re-review
+→ checkpoint commit
+→ push
+→ remote GitHub Actions
+→ Task 12.7
+```
+
+Each remediation remains one explicit task with its own tests, quality gates,
+report, and owner stop. No step may infer authorization for a later step.
 
 MCP exposure of project/task capabilities and multi-agent experiments begin only
 after Stage 12 acceptance. They are not part of the first Agent MVP.
@@ -4771,6 +5058,24 @@ after Stage 12 acceptance. They are not part of the first Agent MVP.
   authorization, and tool contracts have independent tests.
 - Multi-agent experiments require a measured need that the explicit single-Agent
   graph cannot meet; they are not a default architecture goal.
+
+### Unscheduled security backlog
+
+- **P0 — 所有者作用域的有界审批 proposal 预览与 fingerprint 一致性验证**
+  **Status:** Pending scheduling; not implemented. No formal Task number is
+  assigned. This is an independent public-contract security improvement, not
+  part of Task 12.7; existing task numbers and dependencies remain unchanged.
+  Before implementation, confirm the public preview contract. Acceptance must
+  prove all of the following with schema, service, and API tests:
+  - Public fields use an explicit allowlist; preview item counts and total size
+    have enforced bounds.
+  - Trusted owner scope applies to every preview read, with cross-user isolation.
+  - The preview describes the exact validated proposal that will be executed;
+    no silent truncation or substitution can misrepresent an approved action.
+  - Preview, approval, and execution agree on revision and fingerprint;
+    stale revisions are rejected.
+  - Sensitive fields are redacted or excluded; credentials, internal payloads,
+    and complete private documents never enter the public preview.
 
 ## Roadmap consistency checklist
 

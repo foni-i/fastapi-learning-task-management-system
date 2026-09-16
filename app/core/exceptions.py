@@ -14,6 +14,10 @@ AGENT_RUN_NOT_FOUND_MESSAGE = "Agent run does not exist"
 AGENT_RUN_CONFLICT_MESSAGE = "Agent run cannot accept this approval"
 AGENT_WORKFLOW_UNAVAILABLE_MESSAGE = "Agent workflow is temporarily unavailable"
 AGENT_TOOL_RECONCILIATION_MESSAGE = "Agent action requires reconciliation"
+KNOWLEDGE_DOCUMENT_INVALID_MESSAGE = "Document is invalid or unsupported"
+KNOWLEDGE_DOCUMENT_TOO_LARGE_MESSAGE = "Document exceeds the allowed size"
+KNOWLEDGE_DOCUMENT_NOT_FOUND_MESSAGE = "Document does not exist"
+KNOWLEDGE_DOCUMENT_INDEXING_MESSAGE = "Document indexing is temporarily unavailable"
 
 
 class DuplicateEmailError(Exception):
@@ -74,3 +78,19 @@ class AgentWorkflowUnavailableError(Exception):
 
 class AgentToolReconciliationRequiredError(Exception):
     """Fail closed when a Tool write outcome cannot be safely repeated."""
+
+
+class KnowledgeDocumentInvalidError(ValueError):
+    """Reject unsafe document input without retaining its content."""
+
+
+class KnowledgeDocumentTooLargeError(ValueError):
+    """Reject input beyond the bounded upload contract."""
+
+
+class KnowledgeDocumentNotFoundError(Exception):
+    """Hide whether a document is absent or belongs to another user."""
+
+
+class KnowledgeDocumentIndexingError(Exception):
+    """Hide document content, vector values, and provider diagnostics."""

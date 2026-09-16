@@ -51,7 +51,7 @@ NOT_FOUND_RESPONSE = {
 }
 CONFLICT_RESPONSE = {
     "model": AgentRunErrorResponse,
-    "description": "Approval is terminal, already decided, or stale",
+    "description": "Approval does not match the current or persisted decision",
 }
 UNAVAILABLE_RESPONSE = {
     "model": AgentRunErrorResponse,

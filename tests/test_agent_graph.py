@@ -3,12 +3,14 @@
 import json
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError
+from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
 from app.agent.context import AgentRuntimeContext
@@ -16,11 +18,13 @@ from app.agent.graph import (
     AGENT_GRAPH_FAILURE_SUMMARY,
     AGENT_GRAPH_NODE_NAMES,
     AGENT_GRAPH_RECURSION_LIMIT,
+    AgentCheckpointStatus,
     AgentCheckpointThreadError,
     AgentWorkflow,
     build_agent_graph,
 )
 from app.agent.nodes.approval import AgentApprovalRequest, AgentApprovalResponse
+from app.agent.nodes.finalization import verify_result
 from app.agent.providers import (
     ProviderRequest,
     ProviderResponse,
@@ -31,10 +35,16 @@ from app.agent.state import (
     AgentApprovalDecision,
     AgentGraphInput,
     AgentGraphOutput,
+    AgentGraphState,
     AgentTerminalStatus,
 )
 from app.core.exceptions import TaskNotFoundError
 from app.models import TaskPriority, TaskStatus
+from app.schemas.knowledge_retrieval import (
+    KnowledgeCitation,
+    KnowledgeSearchQuery,
+    KnowledgeSearchResult,
+)
 from app.schemas.project import ProjectListResponse
 from app.schemas.task import (
     PublicTask,
@@ -50,6 +60,7 @@ def _proposal_response(
     action_count: int = 0,
     summary: str = "A bounded study plan",
     valid_actions: bool = True,
+    citation_ids: tuple[str, ...] = (),
 ) -> ProviderResponse:
     project_id = uuid4()
     actions: list[dict[str, object]] = []
@@ -77,6 +88,7 @@ def _proposal_response(
                         "title": "Study",
                         "description": "Complete one focused session",
                         "success_criteria": "Notes exist",
+                        "citation_ids": citation_ids,
                     }
                 ],
             },
@@ -123,9 +135,11 @@ class FakeGateway:
         *,
         write_outcomes: Iterable[PublicTask | Exception] = (),
         context_failure: Exception | None = None,
+        knowledge_result: KnowledgeSearchResult | None = None,
     ) -> None:
         self.write_outcomes = list(write_outcomes)
         self.context_failure = context_failure
+        self.knowledge_result = knowledge_result or KnowledgeSearchResult(items=())
         self.calls: list[tuple[str, UUID]] = []
 
     def list_projects(
@@ -153,6 +167,15 @@ class FakeGateway:
         return TaskListResponse(
             items=[], page=query.page, page_size=query.page_size, total=0, pages=0
         )
+
+    def search_knowledge(
+        self,
+        *,
+        user_id: UUID,
+        search_query: KnowledgeSearchQuery,
+    ) -> KnowledgeSearchResult:
+        self.calls.append(("search_knowledge", user_id))
+        return self.knowledge_result
 
     def create_task(
         self,
@@ -275,7 +298,11 @@ def test_happy_no_action_path_returns_one_strict_public_output() -> None:
     assert isinstance(output, AgentGraphOutput)
     assert output.status is AgentTerminalStatus.SUCCEEDED
     assert output.execution_records == ()
-    assert [name for name, _ in gateway.calls] == ["list_projects", "list_tasks"]
+    assert [name for name, _ in gateway.calls] == [
+        "list_projects",
+        "list_tasks",
+        "search_knowledge",
+    ]
     assert all(identity == user_id for _, identity in gateway.calls)
     serialized = output.model_dump_json()
     assert str(user_id) not in serialized
@@ -300,6 +327,69 @@ def test_approved_action_uses_injected_gateway_and_public_result() -> None:
     assert gateway.calls[-1] == ("create_task", user_id)
     assert output.metrics is not None
     assert output.metrics.tool_call_count == 1
+
+
+def test_grounded_plan_uses_only_retrieved_citation_before_approval() -> None:
+    document_id, chunk_id = uuid4(), uuid4()
+    citation_id = f"knowledge:{document_id}:{chunk_id}"
+    gateway = FakeGateway(
+        knowledge_result=KnowledgeSearchResult(
+            items=(
+                KnowledgeCitation(
+                    citation_id=citation_id,
+                    document_id=document_id,
+                    chunk_id=chunk_id,
+                    source="evidence.txt",
+                    page_number=1,
+                    ordinal=0,
+                    distance=None,
+                    vector_rank=None,
+                    lexical_rank=1,
+                    fusion_score=1 / 61,
+                    excerpt="Untrusted evidence",
+                ),
+            )
+        )
+    )
+    provider = CapturingProvider([_proposal_response(citation_ids=(citation_id,))])
+    approver = SequenceApprover([_approve()])
+    workflow, _ = _workflow(
+        provider=provider,
+        approver=approver,
+        gateway=gateway,
+    )
+
+    output = workflow.invoke(
+        AgentGraphInput(goal=PlanningGoal(objective="Use my notes"))
+    )
+
+    assert output.status is AgentTerminalStatus.SUCCEEDED
+    assert output.plan is not None
+    assert output.plan.plan.steps[0].citation_ids == (citation_id,)
+    assert len(approver.requests) == 1
+    assert citation_id in provider.requests[0].input
+    assert "Untrusted evidence" not in output.model_dump_json()
+    assert "Untrusted evidence" not in approver.requests[0].model_dump_json()
+
+
+def test_fabricated_citation_fails_before_approval_or_write() -> None:
+    fabricated = f"knowledge:{uuid4()}:{uuid4()}"
+    approver = SequenceApprover([_approve()])
+    gateway = FakeGateway(write_outcomes=[_task()])
+    workflow, _ = _workflow(
+        provider=CapturingProvider(
+            [_proposal_response(action_count=1, citation_ids=(fabricated,))]
+        ),
+        approver=approver,
+        gateway=gateway,
+    )
+
+    output = workflow.invoke(AgentGraphInput(goal=PlanningGoal(objective="Learn")))
+
+    assert output.status is AgentTerminalStatus.FAILED
+    assert approver.requests == []
+    assert all(name != "create_task" for name, _ in gateway.calls)
+    assert fabricated not in output.model_dump_json()
 
 
 def test_rejected_plan_terminates_without_write() -> None:
@@ -577,13 +667,18 @@ def test_durable_graph_interrupts_with_safe_exact_approval_payload() -> None:
         durable_approval=True,
     )
 
+    thread_id = uuid4()
     progress = workflow.start_durable(
         AgentGraphInput(goal=PlanningGoal(objective="Create a task")),
-        thread_id=uuid4(),
+        thread_id=thread_id,
     )
+    inspection = workflow.inspect_durable(thread_id=thread_id)
 
     assert progress.output is None
     assert progress.approval is not None
+    assert inspection.status is AgentCheckpointStatus.PENDING_INTERRUPT
+    assert inspection.approval == progress.approval
+    assert inspection.output is None
     assert set(progress.approval.model_dump()) == {
         "plan_summary",
         "action_names",
@@ -617,9 +712,12 @@ def test_durable_approve_resumes_to_execution_and_reject_has_no_write() -> None:
         )
 
         completed = workflow.resume_durable(decision, thread_id=thread_id)
+        inspection = workflow.inspect_durable(thread_id=thread_id)
 
         assert completed.output is not None
         assert completed.output.status is expected
+        assert inspection.status is AgentCheckpointStatus.TERMINAL
+        assert inspection.output == completed.output
         writes = [name for name, _ in gateway.calls if name == "create_task"]
         assert len(writes) == (
             1 if decision.decision is AgentApprovalDecision.APPROVED else 0
@@ -649,3 +747,66 @@ def test_durable_request_changes_creates_a_fresh_interrupt_revision() -> None:
     assert first.approval.revision == 0
     assert second.approval.revision == 1
     assert first.approval.proposal_fingerprint != second.approval.proposal_fingerprint
+
+
+def test_public_snapshot_continuation_uses_none_input_and_reaches_terminal() -> None:
+    saver = InMemorySaver()
+    builder = StateGraph(AgentGraphState, input_schema=AgentGraphInput)
+    builder.add_node(
+        "prepare",
+        lambda _state: {"workflow_error_code": "SPIKE_CONTINUATION"},
+    )
+    builder.add_node(
+        "finish",
+        lambda state: dict(verify_result(state)),
+    )
+    builder.add_edge(START, "prepare")
+    builder.add_edge("prepare", "finish")
+    builder.add_edge("finish", END)
+    compiled = builder.compile(checkpointer=saver)
+    thread_id = uuid4()
+    config = {"configurable": {"thread_id": str(thread_id)}}
+    compiled.invoke(  # type: ignore[call-overload]
+        AgentGraphInput(goal=PlanningGoal(objective="Continue")).model_dump(
+            mode="python"
+        ),
+        config=config,
+        interrupt_after=["prepare"],
+    )
+    workflow = AgentWorkflow(
+        compiled,  # type: ignore[arg-type]
+        checkpointing_enabled=True,
+        durable_approval_enabled=True,
+    )
+
+    before = workflow.inspect_durable(thread_id=thread_id)
+    completed = workflow.continue_durable(thread_id=thread_id)
+    after = workflow.inspect_durable(thread_id=thread_id)
+
+    assert before.status is AgentCheckpointStatus.CONTINUABLE
+    assert completed.output is not None
+    assert completed.output.status is AgentTerminalStatus.FAILED
+    assert after.status is AgentCheckpointStatus.TERMINAL
+
+
+def test_checkpoint_inspection_redacts_inconsistent_raw_values() -> None:
+    class InconsistentCompiled:
+        def get_state(self, _config: dict[str, object]) -> object:
+            return SimpleNamespace(
+                interrupts=(),
+                next=(),
+                values={"private_checkpoint_value": "must-not-escape"},
+            )
+
+    workflow = AgentWorkflow(
+        InconsistentCompiled(),  # type: ignore[arg-type]
+        checkpointing_enabled=True,
+        durable_approval_enabled=True,
+    )
+
+    inspection = workflow.inspect_durable(thread_id=uuid4())
+
+    assert inspection.status is AgentCheckpointStatus.INCONSISTENT
+    serialized = repr(inspection).casefold()
+    assert "private_checkpoint_value" not in serialized
+    assert "must-not-escape" not in serialized

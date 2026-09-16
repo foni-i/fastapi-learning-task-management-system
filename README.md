@@ -1,8 +1,11 @@
 # FastAPI STMS
 
-FastAPI STMS 是 StudyFlow Agent 的分阶段后端学习项目。当前已完成 Stage 1～4 的应用、数据库和认证基础，Stage 6～7 的用户私有 Project/Task API，以及 Stage 8～10 的有界单Agent工作流、人工审批、PostgreSQL Checkpoint、幂等写入和安全SSE进度流。所有已实现链路使用 FastAPI、Pydantic 2、SQLAlchemy 2 同步 Session、PostgreSQL、Alembic、Argon2id 和固定 HS256 JWT，并有真实 PostgreSQL 端到端测试。
+FastAPI STMS 是 StudyFlow Agent 的分阶段后端学习项目。当前已完成 Stage 1～4 的应用、数据库和认证基础，Stage 6～7 的用户私有 Project/Task API，Stage 8～10 的有界单Agent工作流，Stage 11 的安全RAG与离线评估，以及 Stage 12.1 的可复现Compose应用镜像。所有已实现链路使用 FastAPI、Pydantic 2、SQLAlchemy 2 同步 Session、PostgreSQL、Alembic、Argon2id 和固定 HS256 JWT，并有真实 PostgreSQL 端到端测试。
 
-当前尚未实现 Refresh Token、Token轮换/撤销、退出登录、密码修改、管理员、密码找回、RAG、MCP或多Agent。Agent普通测试只使用离线合成Provider；真实外部模型调用必须单独授权，不能把当前仓库描述成已完成RAG或多Agent的系统。
+当前尚未实现 Refresh Token、Token轮换/撤销、退出登录、密码修改、管理员、密码找回、grounded claim事实核验、外部Tracing供应商、MCP或多Agent。Agent与Embedding普通测试只使用离线合成Provider；真实外部模型调用必须单独授权，检索citation只表示来源而不保证内容事实为真。
+
+集中式的失败模式、安全保证/非保证、改进优先级和成本公式见
+[`docs/security-and-limitations.md`](docs/security-and-limitations.md)。
 
 ## 前置条件
 
@@ -66,6 +69,69 @@ Copy-Item .env.example .env
 
 没有 `.env` 时，应用仍能以安全默认值启动并提供无 Token 路径，但登录签发和 Bearer 校验不会使用不安全的默认 secret。
 
+现有配置项及边界如下。标为“敏感”的值只能存在于当前 shell、部署密钥存储或未提交的
+`.env`，不能进入 Git、日志或截图：
+
+| 变量 | 用途与适用路径 | 是否敏感/必需 |
+| --- | --- | --- |
+| `STMS_ENV` | `development`、`test` 或 `production` 运行标识 | 非敏感；可选 |
+| `STMS_DEBUG` | FastAPI 调试模式 | 非敏感；可选，生产应为 `false` |
+| `STMS_API_DOCS_ENABLED` | 控制 `/docs`、`/redoc`、`/openapi.json` | 非敏感；可选 |
+| `STMS_DATABASE_URL` | 本机 uv、应用与 Alembic 的同步 Psycopg URL | 敏感；数据库路径必需 |
+| `STMS_ACCESS_TOKEN_SECRET` | HS256 Access Token 签名，至少 32 字符 | **敏感**；登录和 Bearer API 必需 |
+| `STMS_ACCESS_TOKEN_TTL_MINUTES` | Token 有效期，1～60 分钟 | 非敏感；默认 15 |
+| `STMS_ACCESS_TOKEN_ISSUER` / `STMS_ACCESS_TOKEN_AUDIENCE` | Token 签发者与受众校验 | 非敏感；有安全默认值 |
+| `STMS_MODEL_PROVIDER` / `STMS_MODEL_NAME` | 真实 Agent Provider 与模型 ID | Provider 调用时必需 |
+| `STMS_EMBEDDING_MODEL` / `STMS_EMBEDDING_TIMEOUT_SECONDS` | 1536 维文档索引模型与 0.1～120 秒超时 | 显式索引时必需 |
+| `STMS_MODEL_API_KEY` | 模型和 Embedding Provider 凭据 | **敏感**；真实 Provider 调用时必需 |
+| `STMS_APP_PORT` | Compose 暴露到宿主机的应用端口 | 非敏感；Compose 默认 8000 |
+| `STMS_POSTGRES_DEV_*` | Compose 开发库名称、用户、密码和宿主端口 | 密码敏感；仅本机 Compose |
+| `STMS_POSTGRES_TEST_*` | Compose 专用测试库名称、用户、密码和宿主端口 | 密码敏感；仅 integration |
+| `STMS_TEST_DATABASE_URL` | integration 测试显式 opt-in 的专用测试库 URL | **敏感**；只允许指向 `postgres-test` |
+
+基础 `/health/live`、OpenAPI 和普通离线测试不需要数据库、JWT secret 或 Provider key；
+readiness 与业务 API 需要数据库，登录/受保护 API 需要 JWT secret，显式索引与 Agent
+模型执行才需要 Provider 配置。普通 pytest 和 Stage 11 离线评估不得调用真实 Provider。
+
+## 一键启动应用与开发数据库
+
+下面的单条命令构建锁定依赖的应用镜像，只启动 `app` 及其必要的
+`postgres-dev`，等待数据库和应用都通过健康检查；它不会启动
+`postgres-test`：
+
+```powershell
+docker compose up -d --build --wait app
+```
+
+容器先运行 `alembic upgrade head`，成功后才以非 root 用户启动监听
+`0.0.0.0:8000` 的 Uvicorn。应用通过 Compose 内部网络连接
+`postgres-dev:5432`，不依赖宿主机数据库端口；Compose readiness 请求
+`/health/ready`，因此同时验证应用进程和数据库连接。
+
+默认可访问 `http://127.0.0.1:8000/health/live`、
+`http://127.0.0.1:8000/health/ready` 和
+`http://127.0.0.1:8000/openapi.json`。可通过 `STMS_APP_PORT` 改变宿主端口。
+应用和两个 PostgreSQL 服务的宿主发布地址固定为 `127.0.0.1`，默认仅供本机访问。
+`STMS_APP_PORT`、`STMS_POSTGRES_DEV_PORT`、`STMS_POSTGRES_TEST_PORT` 只改变端口，
+不改变绑定地址。容器内 Uvicorn 仍监听 `0.0.0.0:8000`，应用通过内部 DNS
+`postgres-dev:5432` 访问数据库。远程访问需要操作者显式传入额外的 `-f` Compose
+override，并自行配置防火墙、TLS 和非示例凭据；默认配置不提供远程发布开关。
+已有容器必须在端口配置重新应用后才使用新绑定，仅 `docker compose start` 不会更新它。
+Compose 不提供任何 JWT 签名默认值，只会透传当前 shell 或未提交 `.env` 中显式设置的
+`STMS_ACCESS_TOKEN_SECRET`。未配置时，基础启动、health、OpenAPI 和不需要认证的路径
+仍可使用，但 Token 签发与校验会安全失败；需要登录时必须提供至少 32 字符的随机值。
+Provider key 同样保持可选，基础启动和健康检查不会调用外部模型。
+
+验收或本地使用结束后只停止应用和开发数据库；此命令保留容器与
+`fastapi-stms-postgres-dev-data` named volume：
+
+```powershell
+docker compose stop app postgres-dev
+```
+
+不要使用 `docker compose down -v`，也不要为了运行应用而启动或修改
+`postgres-test`。
+
 ## SQLAlchemy 数据库基础设施
 
 项目使用 SQLAlchemy 2 同步 API，各组件职责如下：
@@ -77,19 +143,22 @@ Copy-Item .env.example .env
 
 ## PostgreSQL 开发与测试环境
 
-`compose.yaml` 使用固定镜像 `postgres:17.6-bookworm`，并把两个数据库放在同一个明确命名的 `fastapi-stms` Compose 项目中：
+`compose.yaml` 使用固定镜像 `pgvector/pgvector:0.8.6-pg17-bookworm`，在 PostgreSQL 17 上提供固定 pgvector 扩展版本，并把两个数据库放在同一个明确命名的 `fastapi-stms` Compose 项目中：
 
 | 用途 | Service | 主机端口 | 数据库 | 用户 | 数据策略 |
 | --- | --- | --- | --- | --- | --- |
 | 开发 | `postgres-dev` | `5432` | `stms` | `stms_dev` | named volume，停止/重建容器后保留 |
 | 测试 | `postgres-test` | 默认 `5433` | `stms_test` | `stms_test` | `tmpfs`，容器移除后丢弃 |
 
+以上宿主端口均绑定 `127.0.0.1`；容器之间的访问通过 Compose 内部网络进行。
+
 `.env.example` 中的数据库账号和密码只用于本机开发演示，不是生产凭据。若复制为 `.env` 并修改，绝对不要提交 `.env`。
 
 启动并检查两个数据库：
 
 ```powershell
-docker compose config
+docker compose config --quiet
+if ($LASTEXITCODE -ne 0) { throw "Compose configuration check failed" }
 docker compose up -d postgres-dev postgres-test
 docker compose ps
 docker compose exec postgres-dev pg_isready -U stms_dev -d stms
@@ -133,18 +202,57 @@ docker compose up -d --wait postgres-test
 $env:STMS_TEST_DATABASE_URL = "<dedicated-test-url-from-uncommitted-.env>"
 $env:STMS_DATABASE_URL = $env:STMS_TEST_DATABASE_URL
 
-uv run alembic upgrade head
-uv run alembic current
 uv run python -c "import os; from tests.integration.conftest import validate_migration_test_target; validate_migration_test_target(os.environ.get('STMS_DATABASE_URL')); print('validated dedicated migration test target')"
-uv run alembic downgrade base
-uv run alembic current
+if ($LASTEXITCODE -ne 0) { throw "Migration test target validation failed" }
 uv run alembic upgrade head
+if ($LASTEXITCODE -ne 0) { throw "Migration upgrade failed" }
 uv run alembic current
+if ($LASTEXITCODE -ne 0) { throw "Migration current failed" }
+uv run alembic downgrade base
+if ($LASTEXITCODE -ne 0) { throw "Migration downgrade failed" }
+uv run alembic current
+if ($LASTEXITCODE -ne 0) { throw "Migration current failed" }
+uv run alembic upgrade head
+if ($LASTEXITCODE -ne 0) { throw "Migration upgrade failed" }
+uv run alembic current
+if ($LASTEXITCODE -ne 0) { throw "Migration current failed" }
 uv run alembic check
+if ($LASTEXITCODE -ne 0) { throw "Migration check failed" }
+Remove-Item Env:STMS_DATABASE_URL -ErrorAction SilentlyContinue
 uv run pytest -m integration tests/integration/test_migrations.py
 ```
 
-`downgrade` 可能删除或变更 schema，绝不能在开发或生产数据库上把它当作普通检查运行。上面的 fail-fast 命令必须紧邻 downgrade，并严格验证驱动、本地主机、数据库 `stms_test`、用户 `stms_test`，以及 URL 与 `STMS_POSTGRES_TEST_PORT` 选择的主机端口一致；未显式配置时默认端口为 `5433`。测试 fixture 在每次自动 downgrade 前也执行相同校验。
+`downgrade` 可能删除或变更 schema，绝不能在开发或生产数据库上把它当作普通检查运行。
+将整个代码块作为一个 PowerShell 脚本执行；原生命令失败不会自动抛出异常，因此必须
+立即检查 `$LASTEXITCODE` 并 `throw`，验证失败后不得继续执行剩余命令。
+验证必须先于任何 Alembic 操作，并严格验证驱动、本地主机、数据库 `stms_test`、
+用户 `stms_test`，以及 URL 与 `STMS_POSTGRES_TEST_PORT` 选择的主机端口一致；
+未显式配置时默认端口为 `5433`。操作期间不得更换已验证的 URL；更换后必须重新验证。
+测试 fixture 在每次自动 downgrade 前也执行相同校验。
+
+Bash 用户在专用测试服务已启动后，可使用下面的独立子 shell。先在本机安全设置
+`STMS_TEST_DATABASE_URL`，不要打印连接串，也不要开启 `set -x`。子 shell 任一步失败
+立即退出，不会继续迁移；父 shell 的环境变量不受影响：
+
+```bash
+(
+  set -eu
+  docker compose config --quiet || exit 1
+  : "${STMS_TEST_DATABASE_URL:?Set the dedicated test URL locally first}"
+  export STMS_DATABASE_URL="$STMS_TEST_DATABASE_URL"
+  uv run python -c "import os; from tests.integration.conftest import validate_migration_test_target; validate_migration_test_target(os.environ.get('STMS_DATABASE_URL')); print('validated dedicated migration test target')" || exit 1
+  uv run alembic upgrade head || exit 1
+  uv run alembic current || exit 1
+  uv run alembic downgrade base || exit 1
+  uv run alembic current || exit 1
+  uv run alembic upgrade head || exit 1
+  uv run alembic current || exit 1
+  uv run alembic check || exit 1
+)
+```
+Alembic 命令需要临时把 `STMS_DATABASE_URL` 指向已验证的专用测试库；进入
+integration pytest 前必须移除该变量，只保留 `STMS_TEST_DATABASE_URL`，否则测试
+安全门会按设计拒绝把测试目标同时当成开发数据库。
 
 验证后只停止测试服务；此命令不会停止 `postgres-dev`，也不会删除或修改开发 named volume：
 
@@ -154,7 +262,7 @@ Remove-Item Env:STMS_DATABASE_URL -ErrorAction SilentlyContinue
 Remove-Item Env:STMS_TEST_DATABASE_URL -ErrorAction SilentlyContinue
 ```
 
-## 启动应用
+## 使用本机 uv 启动应用
 
 ```powershell
 uv run fastapi dev app/main.py
@@ -216,6 +324,116 @@ curl.exe -i http://127.0.0.1:8000/health/ready
 - OpenAPI JSON：`http://127.0.0.1:8000/openapi.json`
 
 如果将 `STMS_API_DOCS_ENABLED` 设为 `false`，上述两个文档入口会被关闭。
+
+## API 快速演示
+
+完整的默认无 Provider 演示步骤、录制分镜和脱敏结果快照见
+[`docs/demo/README.md`](docs/demo/README.md)。本节保留唯一的 HTTP payload 示例，演示
+文档直接引用这里，避免维护第二套接口契约。
+
+以下流程以 PowerShell 7、运行在 `http://127.0.0.1:8000` 的本地服务和完全合成数据为例。
+先在未提交的 `.env` 或当前 shell 中配置开发数据库和至少 32 字符的 JWT secret。
+示例把返回的 Token 保存在当前 PowerShell 变量中；不要打印、复制到文档或提交到 Git。
+
+```powershell
+$api = "http://127.0.0.1:8000"
+Invoke-RestMethod -Uri "$api/health/live"
+
+$credentials = @{
+    email = "demo.learner@example.com"
+    password = "<local-demo-password-at-least-12-characters>"
+}
+Invoke-RestMethod -Method Post -Uri "$api/api/v1/auth/register" `
+    -ContentType "application/json" -Body ($credentials | ConvertTo-Json)
+$login = Invoke-RestMethod -Method Post -Uri "$api/api/v1/auth/login" `
+    -ContentType "application/json" -Body ($credentials | ConvertTo-Json)
+$headers = @{ Authorization = "Bearer $($login.access_token)" }
+Invoke-RestMethod -Uri "$api/api/v1/users/me" -Headers $headers
+```
+
+注册成功为 HTTP 201，登录和当前用户为 HTTP 200。公开用户响应只含
+`id`、`email`、`created_at`、`updated_at`。继续创建一个 Project 和所属 Task：
+
+```powershell
+$projectBody = @{
+    name = "Synthetic retrieval study"
+    description = "Local documentation walkthrough"
+    start_date = "2026-09-07"
+    target_date = "2026-10-05"
+} | ConvertTo-Json
+$project = Invoke-RestMethod -Method Post -Uri "$api/api/v1/projects" `
+    -Headers $headers -ContentType "application/json" -Body $projectBody
+
+$taskBody = @{
+    project_id = $project.id
+    title = "Review the synthetic syllabus"
+    description = "Complete the first retrieval-practice session"
+    planned_date = "2026-09-08"
+    due_at = "2026-09-08T12:00:00Z"
+    estimated_minutes = 25
+    priority = "MEDIUM"
+} | ConvertTo-Json
+$task = Invoke-RestMethod -Method Post -Uri "$api/api/v1/tasks" `
+    -Headers $headers -ContentType "application/json" -Body $taskBody
+```
+
+两个创建请求均返回 HTTP 201；公开响应不含 `user_id`。知识文档上传使用仓库自带的
+[合成 syllabus](docs/demo/sample-syllabus.md)，上传只解析并保存文档，**不会自动调用**
+Embedding Provider：
+
+```powershell
+$env:STMS_DEMO_ACCESS_TOKEN = $login.access_token
+$document = curl.exe --fail-with-body `
+    -H "Authorization: Bearer $env:STMS_DEMO_ACCESS_TOKEN" `
+    -F "file=@docs/demo/sample-syllabus.md;type=text/markdown" `
+    "$api/api/v1/knowledge/documents" | ConvertFrom-Json
+```
+
+上传成功为 HTTP 201。只有已经配置真实 Provider、API key 和 1536 维 embedding 模型时，
+才显式索引；这一步可能产生外部调用和费用，不属于普通测试：
+
+```powershell
+$indexed = Invoke-RestMethod -Method Post `
+    -Uri "$api/api/v1/knowledge/documents/$($document.id)/index" `
+    -Headers $headers
+```
+
+Agent Run 同样只应在明确配置并授权真实模型调用后执行。请求不能携带 `user_id`、
+Session、SQL、向量、Tool allowlist 或审批结果：
+
+```powershell
+$runBody = @{
+    goal = @{
+        objective = "Create a four-week study plan from my indexed material"
+        constraints = @("Use sessions of at most 30 minutes")
+    }
+} | ConvertTo-Json -Depth 4
+$snapshot = Invoke-RestMethod -Method Post -Uri "$api/api/v1/agent/runs" `
+    -Headers $headers -ContentType "application/json" -Body $runBody
+
+# When approval is pending, bind the decision to this exact revision and fingerprint.
+$approvalBody = @{
+    revision = $snapshot.approval.revision
+    proposal_fingerprint = $snapshot.approval.proposal_fingerprint
+    decision = "APPROVED"
+} | ConvertTo-Json
+$snapshot = Invoke-RestMethod -Method Post `
+    -Uri "$api/api/v1/agent/runs/$($snapshot.run.id)/approval" `
+    -Headers $headers -ContentType "application/json" -Body $approvalBody
+
+# The response is text/event-stream; Last-Event-ID may resume after a known event.
+Invoke-WebRequest -Uri "$api/api/v1/agent/runs/$($snapshot.run.id)/events" `
+    -Headers $headers
+```
+
+Run 创建成功为 HTTP 201，读取、审批和 SSE 为 HTTP 200。只有服务端返回非空、状态为
+pending 的 `approval` 时才能构造审批请求；拒绝使用 `REJECTED`，请求修改使用
+`REQUEST_CHANGES` 并额外提供最多 1000 字符的 `feedback`。完成演示后清除当前会话变量：
+
+```powershell
+Remove-Item Env:STMS_DEMO_ACCESS_TOKEN -ErrorAction SilentlyContinue
+Remove-Variable login, headers, credentials -ErrorAction SilentlyContinue
+```
 
 ## 认证与当前用户 API
 
@@ -602,12 +820,18 @@ HTTP Agent API -> LangGraph node -> Agent Tool -> Domain Service
 客户端不能提供 `thread_id`、`run_id` 或 `user_id`。Thread ID是LangGraph
 `configurable.thread_id`使用的稳定产品身份，Run ID只标识一次产品执行，不作为
 Checkpoint ID。跨用户读取和不存在的Run统一返回安全404；审批必须与当前Run、
-revision和proposal fingerprint严格匹配，重复、过期或终止后的决定返回409。
+revision和proposal fingerprint严格匹配。相同decision及规范化feedback的重试会恢复
+未完成的checkpoint，或在已完成时返回同一安全Run快照；不同revision、fingerprint、
+decision或feedback仍返回409。
 
 高影响的 `batch_create_tasks` 和 `delete_task` 由代码固定分类，必须同时满足写Tool
 开关、已验证提案、匹配的持久化审批以及数据库幂等claim。产品审计只持久化有界的
 Run、Approval和Tool执行摘要，不保存Tool参数、完整Prompt、模型原始响应或隐藏推理。
 LangGraph官方PostgreSQL Checkpoint只负责恢复图状态，不能替代产品审计记录。
+审批恢复使用由完整Run UUID稳定映射的PostgreSQL transaction advisory lock；锁由独立
+短生命周期连接持有，覆盖获锁后重读、公开checkpoint检查、resume/continue/reconcile
+和最终产品提交。进程终止会随连接关闭释放锁。未知checkpoint或基础设施结果保留
+`RUNNING`以供相同请求重试并返回固定503，不会猜测完成状态或自动重放`UNKNOWN` Tool。
 
 SSE事件版本为 `agent-event.v1`，公开run/node状态、Tool开始与安全结果摘要、审批需求、
 安全指标、heartbeat、terminal result和safe error。事件ID在Run内稳定且单调，
@@ -622,8 +846,77 @@ Stage 10真实验收仅使用可丢弃的 `postgres-test`。Windows不能绑定�
 领域表保留，然后重新升级并运行 `alembic current`、`heads` 和 `check`。不得操作
 `postgres-dev`、删除volume、输出完整数据库URL或使用SQLite代替PostgreSQL行为。
 
-当前没有Refresh Token、logout、密码修改、RAG、pgvector、外部Tracing、MCP或
-多Agent。Stage 11只有在Stage 10验收并获得owner确认后才能开始。
+## Stage 11 文档解析、混合检索、安全 Grounding、Tracing 与离线评估
+
+认证用户可通过 `POST /api/v1/knowledge/documents` 上传不超过5 MiB的 `.txt`、
+`.md` 或未加密 `.pdf`，并通过 `GET /api/v1/knowledge/documents/{document_id}`
+读取安全元数据。上传路由在 multipart 解析前以纯 ASGI 流式计数将整个请求体限制为
+`5 MiB + 64 KiB`（文件预算加固定表单封装预算），且端点和Service仍独立执行5 MiB
+文件上限。超限返回固定413；文件名或解析文本中的U+0000在Repository构造前返回固定
+422，不回显输入。原始解析文本、SHA-256和 `user_id` 不会进入公开响应。
+
+索引是单独的显式操作：
+
+```text
+POST /api/v1/knowledge/documents/{document_id}/index
+  -> owner-scoped document lookup
+  -> deterministic page-aware chunks (2000 chars, 200 overlap)
+  -> configured synchronous EmbeddingProvider (1536 dimensions)
+  -> atomic chunk replacement and INDEXED status
+```
+
+上传不会自动访问Embedding Provider。生产索引要求 `STMS_MODEL_PROVIDER=openai`、
+`STMS_MODEL_API_KEY`、`STMS_EMBEDDING_MODEL` 和有界的
+`STMS_EMBEDDING_TIMEOUT_SECONDS`。普通测试使用确定性Fake，不发起网络请求。
+每份文档最多保存200个私有chunk；向量必须恰为1536维且所有值有限。数据库使用
+复合owner外键、GIN `tsvector`索引和HNSW cosine索引，Repository不提交事务，
+Service在替换成功后统一提交，任何失败都会回滚。
+
+Task 11.2 已在专用的 PostgreSQL 17 `postgres-test` 上完成真实验收：`vector`
+扩展版本为0.8.6，embedding列为 `vector(1536)`，生成式 `tsvector`、GIN索引与
+HNSW cosine索引均由数据库目录确认；迁移降级到 `d7a1e4c9b320` 时documents表
+保留且chunks表移除，随后可重新升级到唯一head。完整integration套件通过，且未
+调用真实外部Embedding API。
+
+Agent 只读 Tool `search_knowledge` 接受1～2000字符的 `query`、1～20的
+`top_k`（默认10）以及最多20个可选 `document_ids`。`user_id` 始终来自可信运行
+上下文，Tool参数不接受Session、SQL/tsquery、向量、运算符、权重或RRF配置。
+Repository分别取得最多40个simple全文候选和40个cosine候选；两路都先应用chunk与
+document的owner条件及可选document过滤，再排名。代码使用固定
+`1 / (60 + rank)`贡献进行确定性RRF，相同chunk合并，融合分数相同时按chunk UUID
+升序，最终最多20条。结果只公开稳定citation ID、安全来源、可选页码、ordinal、最多
+500字符的excerpt以及有界排名证据；不会返回owner、完整文档、embedding、tsvector、
+SQL或ORM对象。citation只标识检索来源，不保证内容事实为真。
+
+`load_context` 使用可信运行身份，通过现有 `search_knowledge` Tool 以目标文本执行一次
+有界检索。Agent state最多保存10条公开证据，Prompt中的Grounding区最多12,000字符，
+并以版本化边界明确标记为不可信数据。检索文本不能改变身份、Tool allowlist、授权、
+审批、系统规则或输出Schema。`study-plan.v2`允许每个计划步骤携带最多10个citation ID；
+存在证据时每一步必须引用本次检索得到的ID，无证据时禁止伪造引用。引用验证发生在
+审批之前，最终cited proposal的规范化内容进入approval fingerprint。公开结果和审批
+载荷不会包含excerpt或完整文档。
+
+Agent graph、node、Provider尝试和Tool执行边界支持注入同步 `TraceSink`。默认
+No-op sink不保留任何内容；`agent-trace.v1`事件只允许run/thread关联ID、固定的
+component/name、阶段、outcome、安全错误码、prompt版本、有界次数/token计数及非负
+latency。Trace不包含goal、Prompt、文档、citation内容、Tool参数/结果、用户身份、
+凭据、SQL、向量、异常文本或隐藏推理，也不会写入checkpoint、产品audit、SSE或
+数据库。sink失败会被隔离，不能改变原工作流结果、重试次数、Tool调用或事务。
+
+Stage 11保留 `stage11-eval.v1` / `stage11-baseline.v1` 作为历史工件；v1的
+`fake_script` 会直接提供部分最终观察值且input未进入执行，因此不能作为当前准确率或
+恢复能力证据。R6新增语义隔离的 `stage11-eval.v2` 30-case数据集和
+`stage11-baseline.v2`。input实际进入goal/prompt或owner-scoped retrieval/grounding；
+fake Provider接收生产 `ProviderRequest`，输出经过真实schema、graph、Tool、citation和
+approval路径，expectation只在观察完成后参与判定。usage来自实际
+`ProviderResponse`，latency来自注入clock调用。快速baseline无Docker、网络、密钥和
+真实写；recovery/duplicate证据仅由guarded `postgres-test` 集成测试从公共checkpoint
+状态及测试拥有的产品行生成，不进入快速gate。报告和baseline只保留安全ID、布尔值、
+有界计数与聚合，不保存完整input、Prompt、文档、Tool参数/结果、Token或数据库URL。
+
+当前没有Refresh Token、logout、密码修改、神经reranker、grounded claim事实核验或
+外部Tracing供应商，也没有公共搜索HTTP接口、MCP或多Agent。Task 11.8完成后Stage 11
+结束，必须等待owner确认。
 
 ## 测试和质量检查
 
@@ -655,6 +948,11 @@ uv lock --check
 git diff --check
 ```
 
+`.github/workflows/ci.yml` 已在 Task 12.2 本地实现为两个独立 job：offline quality 和
+受保护的 PostgreSQL 17 + pgvector integration。当前改动尚未 commit/push，因此还没有
+包含该 workflow 的 GitHub Actions run；只有推送后观察到真实成功 run，才能添加 CI
+badge 或声称远端 CI 通过。本地普通测试不因 CI 文件存在而访问网络或真实 Provider。
+
 Stage 7 的完整质量门禁是普通 pytest、显式 PostgreSQL integration pytest、OpenAPI 契约、Alembic迁移往返和head/drift、Ruff lint、Ruff format、mypy、lock check与diff check。SQLite不作为PostgreSQL integration行为的替代品。
 
 ## Stage 7 最终验证顺序
@@ -675,85 +973,46 @@ Stage 7 的完整质量门禁是普通 pytest、显式 PostgreSQL integration py
 
 ```text
 FastAPI-STMS/
+|-- .github/workflows/ci.yml
 |-- app/
+|   |-- agent/          # 单 Agent 图、Tool、Grounding、Tracing、离线评估
 |   |-- api/
 |   |   |-- v1/
 |   |   |   |-- endpoints/
-|   |   |   |   |-- __init__.py
 |   |   |   |   |-- auth.py
+|   |   |   |   |-- agent_runs.py
+|   |   |   |   |-- knowledge_documents.py
 |   |   |   |   |-- users.py
 |   |   |   |   |-- projects.py
 |   |   |   |   `-- tasks.py
-|   |   |   |-- __init__.py
 |   |   |   `-- router.py
-|   |   |-- __init__.py
 |   |   |-- health.py
 |   |   `-- router.py
-|   |-- core/
-|   |   |-- config.py
-|   |   |-- email_normalization.py
-|   |   |-- exceptions.py
-|   |   |-- security.py
-|   |   `-- tokens.py
-|   |-- db/
-|   |   |-- __init__.py
-|   |   |-- base.py
-|   |   |-- probe.py
-|   |   `-- session.py
-|   |-- models/          # User、Project、Task ORM
+|   |-- core/            # 配置、认证、安全错误
+|   |-- db/              # Base、Engine、Session、readiness probe
+|   |-- models/          # 用户、项目、任务、Agent、知识文档 ORM
 |   |-- repositories/    # 同步owner-scoped持久化
 |   |-- schemas/         # 严格请求、查询和公开响应
 |   |-- services/        # 业务规则与写事务边界
-|   |-- __init__.py
 |   `-- main.py
 |-- alembic/
-|   |-- versions/
-|   |   |-- 20260825_0001_stage_2_baseline.py
-|   |   |-- 20260826_0002_create_users_table.py
-|   |   |-- 20260826_0003_add_user_email_unique_constraint.py
-|   |   |-- 20260831_0004_create_projects_table.py
-|   |   `-- 20260901_0005_create_tasks_table.py
+|   |-- versions/        # 唯一迁移链，当前 head e3b7c2d9a410
 |   |-- env.py
 |   `-- script.py.mako
+|-- evals/stage11/       # 合成数据集、baseline 与评估说明
 |-- docs/
 |   |-- architecture.md
+|   |-- demo/sample-syllabus.md
 |   |-- requirements.md
-|   `-- roadmap.md
+|   |-- roadmap.md
+|   `-- tasks/           # Stage 12 独立任务说明
 |-- tests/
-|   |-- __init__.py
-|   |-- conftest.py
-|   |-- integration/
-|   |   |-- __init__.py
-|   |   |-- conftest.py
-|   |   |-- test_authentication.py
-|   |   |-- test_database_connection.py
-|   |   |-- test_migrations.py
-|   |   |-- test_registration.py
-|   |   |-- test_registration_conflict.py
-|   |   |-- test_readiness.py
-|   |   |-- test_user_email_uniqueness.py
-|   |   |-- test_user_migration.py
-|   |   |-- test_user_repository.py
-|   |   |-- test_project_migration.py
-|   |   |-- test_projects.py
-|   |   |-- test_task_migration.py
-|   |   `-- test_tasks.py
-|   |-- test_access_tokens.py
-|   |-- test_alembic_config.py
-|   |-- test_auth_dependencies.py
-|   |-- test_auth_schemas.py
-|   |-- test_authentication_service.py
-|   |-- test_config.py
-|   |-- test_current_user_api.py
-|   |-- test_current_user_service.py
-|   |-- test_db_session.py
-|   |-- test_health.py
-|   |-- test_integration_database_safety.py
-|   |-- test_login_api.py
-|   |-- test_registration_api.py
-|   |-- test_registration_service.py
-|   |-- test_security.py
-|   `-- test_main.py
+|   |-- integration/     # 专用 postgres-test 行为与迁移验收
+|   |-- external/        # 默认排除、需显式授权的 Provider smoke
+|   |-- fakes/           # 无网络的确定性 Provider/Embedding/Trace fakes
+|   `-- test_*.py        # 普通离线单元与契约测试
+|-- .dockerignore
+|-- Dockerfile
 |-- alembic.ini
 |-- compose.yaml
 |-- .env.example
@@ -776,4 +1035,9 @@ Stage 8提供可替换Provider、版本化Prompt、严格结构化结果、Servi
 
 外部Provider smoke test默认被`external_provider`标记排除。只有owner明确授权网络、凭据和可能产生的费用后，才可在仅包含合成提示的环境中显式设置`STMS_RUN_EXTERNAL_PROVIDER_SMOKE=1`并单独选择该marker；不得在普通CI中启用，也不得输出API Key或完整模型响应。
 
-Stage 5的Refresh Token、轮换、退出登录和密码修改保留为非阻塞的延后认证增强轨道。Stage 10完成后必须等待owner确认；下一阶段是Stage 11的限定文档RAG、离线评估、安全与Tracing。当前尚未实现RAG、pgvector、外部Tracing、MCP或多Agent。
+Stage 5的Refresh Token、轮换、退出登录和密码修改保留为非阻塞的延后认证增强轨道。Stage 11已经提供文档上传、私有解析、确定性分块、pgvector词法/向量RRF检索、受限于不可信数据边界和严格citation验证的Agent Grounding、不记录内容的有界Tracing，以及版本化离线评估、指标和安全门。当前尚未实现grounded claim事实核验或外部Tracing供应商。
+
+Stage 12.1 已提供可复现的一键 Compose 应用启动；Task 12.2 的两段式 GitHub Actions
+workflow 已在本地验证但尚未 commit/push，因此没有对应远端 run。当前 Task 12.3 只完善
+使用文档与合成演示资料；架构图、演示编排、安全/成本说明和求职材料仍由后续独立任务
+处理。MCP、多 Agent 与云部署均不在当前范围。

@@ -2,7 +2,9 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol, cast
+from enum import StrEnum
+from time import monotonic
+from typing import Any, Protocol, cast
 from uuid import UUID
 
 from langchain_core.runnables.graph import Graph
@@ -27,6 +29,7 @@ from app.agent.nodes.planning import generate_plan, validate_plan
 from app.agent.planning import Clock, Sleeper
 from app.agent.providers import ModelProvider
 from app.agent.routing import AgentRoute, route_after_approval
+from app.agent.schemas import STUDY_PLAN_PROMPT_VERSION
 from app.agent.state import (
     AgentGraphInput,
     AgentGraphOutput,
@@ -35,10 +38,19 @@ from app.agent.state import (
     AgentValidationStatus,
 )
 from app.agent.tools import AgentToolGateway
+from app.agent.tracing import (
+    NOOP_TRACE_SINK,
+    TraceComponent,
+    TraceErrorCode,
+    TraceSink,
+    TraceSpan,
+    start_trace,
+)
 
 AGENT_GRAPH_RECURSION_LIMIT = 16
 AGENT_GRAPH_FAILURE_SUMMARY = "Agent workflow failed safely."
 AGENT_CHECKPOINT_THREAD_MESSAGE = "Agent checkpoint thread ID is required"
+AGENT_CHECKPOINT_STATE_MESSAGE = "Agent checkpoint state cannot be reconciled"
 
 ANALYZE_GOAL = "analyze_goal"
 LOAD_CONTEXT = "load_context"
@@ -72,8 +84,10 @@ type StateUpdate = dict[str, object]
 class _CompiledGraph(Protocol):
     def invoke(
         self,
-        input: dict[str, object] | Command[object],
+        input: dict[str, object] | Command[object] | None,
         config: dict[str, object] | None = None,
+        *,
+        durability: str | None = None,
     ) -> dict[str, object]: ...
 
     def get_graph(self) -> Graph: ...
@@ -85,10 +99,32 @@ class AgentCheckpointThreadError(RuntimeError):
     """Reject missing or invalid host-owned checkpoint identity safely."""
 
 
+class AgentCheckpointStateError(RuntimeError):
+    """Reject a checkpoint that cannot be safely advanced or reconciled."""
+
+
+class AgentCheckpointStatus(StrEnum):
+    """Safe public-API classification of one durable graph checkpoint."""
+
+    PENDING_INTERRUPT = "pending_interrupt"
+    CONTINUABLE = "continuable"
+    TERMINAL = "terminal"
+    INCONSISTENT = "inconsistent"
+
+
 @dataclass(frozen=True)
 class AgentWorkflowProgress:
     """Return either one safe approval interrupt or one terminal output."""
 
+    approval: AgentApprovalInterrupt | None = None
+    output: AgentGraphOutput | None = None
+
+
+@dataclass(frozen=True)
+class AgentCheckpointInspection:
+    """Expose only validated recovery facts, never raw checkpoint state."""
+
+    status: AgentCheckpointStatus
     approval: AgentApprovalInterrupt | None = None
     output: AgentGraphOutput | None = None
 
@@ -144,10 +180,63 @@ class AgentWorkflow:
         *,
         checkpointing_enabled: bool = False,
         durable_approval_enabled: bool = False,
+        trace_sink: TraceSink = NOOP_TRACE_SINK,
+        trace_run_id: UUID | None = None,
+        trace_clock: Clock = monotonic,
     ) -> None:
         self._compiled = compiled
         self._checkpointing_enabled = checkpointing_enabled
         self._durable_approval_enabled = durable_approval_enabled
+        self._trace_sink = trace_sink
+        self._trace_run_id = trace_run_id
+        self._trace_clock = trace_clock
+
+    def _start_run_trace(self, thread_id: UUID | None) -> TraceSpan:
+        return start_trace(
+            self._trace_sink,
+            run_id=self._trace_run_id,
+            thread_id=thread_id,
+            component=TraceComponent.RUN,
+            name="agent_workflow",
+            prompt_version=STUDY_PLAN_PROMPT_VERSION,
+            clock=self._trace_clock,
+        )
+
+    def _finish_run_trace(
+        self,
+        span: TraceSpan,
+        *,
+        output: AgentGraphOutput | None = None,
+        failed: bool = False,
+    ) -> None:
+        metrics = None if output is None else output.metrics
+        model_round_count = None if metrics is None else metrics.model_round_count
+        provider_attempt_count = (
+            None if metrics is None else metrics.provider_attempt_count
+        )
+        tool_call_count = None if metrics is None else metrics.tool_call_count
+        input_tokens = None if metrics is None else metrics.input_tokens
+        output_tokens = None if metrics is None else metrics.output_tokens
+        total_tokens = None if metrics is None else metrics.total_tokens
+        if failed:
+            span.fail(
+                TraceErrorCode.AGENT_WORKFLOW_FAILED,
+                model_round_count=model_round_count,
+                provider_attempt_count=provider_attempt_count,
+                tool_call_count=tool_call_count,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+            )
+        else:
+            span.finish(
+                model_round_count=model_round_count,
+                provider_attempt_count=provider_attempt_count,
+                tool_call_count=tool_call_count,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+            )
 
     def get_graph(self) -> Graph:
         """Expose static topology for inspection without exposing runtime state."""
@@ -170,23 +259,38 @@ class AgentWorkflow:
         config: dict[str, object] = {"recursion_limit": AGENT_GRAPH_RECURSION_LIMIT}
         if thread_id is not None:
             config["configurable"] = {"thread_id": str(thread_id)}
+        trace_started = self._start_run_trace(thread_id)
         try:
             result = self._compiled.invoke(
                 validated_input.model_dump(mode="python"),
                 config=config,
             )
             final_state = AgentGraphState.model_validate(result)
-            return summarize(final_state)
+            output = summarize(final_state)
+            self._finish_run_trace(
+                trace_started,
+                output=output,
+                failed=output.status
+                in {
+                    AgentTerminalStatus.FAILED,
+                    AgentTerminalStatus.PARTIAL_FAILURE,
+                },
+            )
+            return output
         except GraphRecursionError:
-            return AgentGraphOutput(
+            output = AgentGraphOutput(
                 status=AgentTerminalStatus.FAILED,
                 summary=AGENT_GRAPH_FAILURE_SUMMARY,
             )
+            self._finish_run_trace(trace_started, output=output, failed=True)
+            return output
         except Exception:
-            return AgentGraphOutput(
+            output = AgentGraphOutput(
                 status=AgentTerminalStatus.FAILED,
                 summary=AGENT_GRAPH_FAILURE_SUMMARY,
             )
+            self._finish_run_trace(trace_started, output=output, failed=True)
+            return output
 
     def start_durable(
         self,
@@ -218,24 +322,108 @@ class AgentWorkflow:
             thread_id=thread_id,
         )
 
-    def _advance(
-        self,
-        graph_input: dict[str, object] | Command[object],
-        *,
-        thread_id: UUID,
-    ) -> AgentWorkflowProgress:
-        config: dict[str, object] = {
+    def inspect_durable(self, *, thread_id: UUID) -> AgentCheckpointInspection:
+        """Classify a checkpoint through LangGraph's public state snapshot API."""
+
+        self._require_durable_thread(thread_id)
+        snapshot = self._compiled.get_state(self._checkpoint_config(thread_id))
+        return self._inspect_snapshot(snapshot)
+
+    def continue_durable(self, *, thread_id: UUID) -> AgentWorkflowProgress:
+        """Continue a checkpoint whose public snapshot reports pending nodes."""
+
+        self._require_durable_thread(thread_id)
+        return self._advance(None, thread_id=thread_id)
+
+    def _require_durable_thread(self, thread_id: UUID) -> None:
+        if not self._durable_approval_enabled or not isinstance(thread_id, UUID):
+            raise AgentCheckpointThreadError(AGENT_CHECKPOINT_THREAD_MESSAGE)
+
+    @staticmethod
+    def _checkpoint_config(thread_id: UUID) -> dict[str, object]:
+        return {
             "recursion_limit": AGENT_GRAPH_RECURSION_LIMIT,
             "configurable": {"thread_id": str(thread_id)},
         }
-        result = self._compiled.invoke(graph_input, config=config)
-        snapshot = self._compiled.get_state(config)
-        interrupts = getattr(snapshot, "interrupts", ())
+
+    @staticmethod
+    def _inspect_snapshot(snapshot: object) -> AgentCheckpointInspection:
+        """Project a public StateSnapshot into bounded recovery facts."""
+
+        try:
+            public_snapshot = cast(Any, snapshot)
+            interrupts = tuple(public_snapshot.interrupts)
+            next_nodes = tuple(public_snapshot.next)
+            values = public_snapshot.values
+        except AttributeError, TypeError:
+            return AgentCheckpointInspection(AgentCheckpointStatus.INCONSISTENT)
+
         if interrupts:
-            approval = AgentApprovalInterrupt.model_validate(interrupts[0].value)
-            return AgentWorkflowProgress(approval=approval)
-        state = AgentGraphState.model_validate(result)
-        return AgentWorkflowProgress(output=summarize(state))
+            if len(interrupts) != 1 or next_nodes != (REQUEST_APPROVAL,):
+                return AgentCheckpointInspection(AgentCheckpointStatus.INCONSISTENT)
+            try:
+                approval = AgentApprovalInterrupt.model_validate(interrupts[0].value)
+            except Exception:
+                return AgentCheckpointInspection(AgentCheckpointStatus.INCONSISTENT)
+            return AgentCheckpointInspection(
+                AgentCheckpointStatus.PENDING_INTERRUPT,
+                approval=approval,
+            )
+
+        try:
+            state = AgentGraphState.model_validate(values)
+        except Exception:
+            return AgentCheckpointInspection(AgentCheckpointStatus.INCONSISTENT)
+
+        if not next_nodes:
+            if state.terminal_status is None:
+                return AgentCheckpointInspection(AgentCheckpointStatus.INCONSISTENT)
+            try:
+                output = summarize(state)
+            except Exception:
+                return AgentCheckpointInspection(AgentCheckpointStatus.INCONSISTENT)
+            return AgentCheckpointInspection(
+                AgentCheckpointStatus.TERMINAL,
+                output=output,
+            )
+        if state.terminal_status is not None:
+            return AgentCheckpointInspection(AgentCheckpointStatus.INCONSISTENT)
+        return AgentCheckpointInspection(AgentCheckpointStatus.CONTINUABLE)
+
+    def _advance(
+        self,
+        graph_input: dict[str, object] | Command[object] | None,
+        *,
+        thread_id: UUID,
+    ) -> AgentWorkflowProgress:
+        self._require_durable_thread(thread_id)
+        config = self._checkpoint_config(thread_id)
+        trace_started = self._start_run_trace(thread_id)
+        try:
+            self._compiled.invoke(graph_input, config=config, durability="sync")
+            snapshot = self._compiled.get_state(config)
+            inspection = self._inspect_snapshot(snapshot)
+            if inspection.status is AgentCheckpointStatus.PENDING_INTERRUPT:
+                assert inspection.approval is not None
+                self._finish_run_trace(trace_started)
+                return AgentWorkflowProgress(approval=inspection.approval)
+            if inspection.status is not AgentCheckpointStatus.TERMINAL:
+                raise AgentCheckpointStateError(AGENT_CHECKPOINT_STATE_MESSAGE)
+            assert inspection.output is not None
+            output = inspection.output
+            self._finish_run_trace(
+                trace_started,
+                output=output,
+                failed=output.status
+                in {
+                    AgentTerminalStatus.FAILED,
+                    AgentTerminalStatus.PARTIAL_FAILURE,
+                },
+            )
+            return AgentWorkflowProgress(output=output)
+        except Exception:
+            self._finish_run_trace(trace_started, failed=True)
+            raise
 
 
 def build_agent_graph(
@@ -250,8 +438,41 @@ def build_agent_graph(
     checkpointer: BaseCheckpointSaver[str] | None = None,
     durable_approval: bool = False,
     action_executor: IdempotentActionExecutor | None = None,
+    trace_sink: TraceSink = NOOP_TRACE_SINK,
+    trace_run_id: UUID | None = None,
+    trace_clock: Clock = monotonic,
 ) -> AgentWorkflow:
     """Compile the eight accepted nodes with host-owned runtime dependencies."""
+
+    def traced_node(
+        name: str,
+        error_code: TraceErrorCode,
+        node: Callable[[AgentGraphState], StateUpdate],
+    ) -> Callable[[AgentGraphState], StateUpdate]:
+        def invoke(state: AgentGraphState) -> StateUpdate:
+            span = start_trace(
+                trace_sink,
+                run_id=trace_run_id,
+                component=TraceComponent.NODE,
+                name=name,
+                prompt_version=STUDY_PLAN_PROMPT_VERSION,
+                clock=trace_clock,
+            )
+            try:
+                update = node(state)
+            except GraphInterrupt:
+                span.finish()
+                raise
+            except Exception:
+                span.fail(error_code)
+                raise
+            if update.get("workflow_error_code") is not None:
+                span.fail(error_code)
+            else:
+                span.finish()
+            return update
+
+        return invoke
 
     def analysis_node(state: AgentGraphState) -> StateUpdate:
         try:
@@ -265,6 +486,9 @@ def build_agent_graph(
                 state,
                 runtime_context=runtime_context,
                 gateway=gateway,
+                trace_sink=trace_sink,
+                trace_run_id=trace_run_id,
+                trace_clock=trace_clock,
             )
         except Exception:
             return _failed(_CONTEXT_FAILED)
@@ -277,6 +501,9 @@ def build_agent_graph(
                 provider=provider,
                 clock=clock,
                 sleeper=sleeper,
+                trace_sink=trace_sink,
+                trace_run_id=trace_run_id,
+                trace_clock=trace_clock,
             )
             update["metrics"] = _merge_metrics(state.metrics, update["metrics"])
             return dict(update)
@@ -359,14 +586,30 @@ def build_agent_graph(
         return VERIFY_RESULT
 
     builder = StateGraph(AgentGraphState, input_schema=AgentGraphInput)
-    builder.add_node(ANALYZE_GOAL, analysis_node)
-    builder.add_node(LOAD_CONTEXT, context_node)
-    builder.add_node(GENERATE_PLAN, planning_node)
-    builder.add_node(VALIDATE_PLAN, validation_node)
-    builder.add_node(REQUEST_APPROVAL, approval_node)
-    builder.add_node(EXECUTE_TASKS, execution_node)
-    builder.add_node(VERIFY_RESULT, verification_node)
-    builder.add_node(SUMMARIZE, summary_node)
+
+    def add_traced_node(
+        name: str,
+        error_code: TraceErrorCode,
+        node: Callable[[AgentGraphState], StateUpdate],
+    ) -> None:
+        builder.add_node(name, cast(Any, traced_node(name, error_code, node)))
+
+    add_traced_node(ANALYZE_GOAL, TraceErrorCode.AGENT_ANALYSIS_FAILED, analysis_node)
+    add_traced_node(LOAD_CONTEXT, TraceErrorCode.AGENT_CONTEXT_FAILED, context_node)
+    add_traced_node(GENERATE_PLAN, TraceErrorCode.AGENT_PLANNING_FAILED, planning_node)
+    add_traced_node(
+        VALIDATE_PLAN, TraceErrorCode.AGENT_PLANNING_FAILED, validation_node
+    )
+    add_traced_node(
+        REQUEST_APPROVAL, TraceErrorCode.AGENT_APPROVAL_FAILED, approval_node
+    )
+    add_traced_node(
+        EXECUTE_TASKS, TraceErrorCode.AGENT_EXECUTION_NODE_FAILED, execution_node
+    )
+    add_traced_node(
+        VERIFY_RESULT, TraceErrorCode.AGENT_WORKFLOW_FAILED, verification_node
+    )
+    add_traced_node(SUMMARIZE, TraceErrorCode.AGENT_WORKFLOW_FAILED, summary_node)
 
     builder.add_edge(START, ANALYZE_GOAL)
     builder.add_conditional_edges(
@@ -406,4 +649,7 @@ def build_agent_graph(
         compiled,
         checkpointing_enabled=checkpointer is not None,
         durable_approval_enabled=durable_approval,
+        trace_sink=trace_sink,
+        trace_run_id=trace_run_id,
+        trace_clock=trace_clock,
     )

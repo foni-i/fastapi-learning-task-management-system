@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+from app.agent.grounding import GroundedKnowledgeContext, GroundingEvidence
 from app.agent.metrics import AgentRunMetrics, AgentRunOutcome
 from app.agent.schemas import (
     STUDY_PLAN_PROMPT_VERSION,
@@ -113,7 +114,7 @@ def test_analysis_and_context_are_bounded_public_values() -> None:
     assert analysis.objective == "Learn transactions"
     assert analysis.constraints == ("Finish this week",)
     assert state.context is not None
-    assert set(state.context.model_dump()) == {"projects", "tasks"}
+    assert set(state.context.model_dump()) == {"projects", "tasks", "knowledge"}
     with pytest.raises(ValidationError, match="must be unique"):
         AgentGoalAnalysis(
             objective="Learn",
@@ -259,3 +260,44 @@ def test_existing_public_context_rejects_internal_owner_fields() -> None:
                 "pages": 1,
             }
         )
+
+
+def test_grounded_state_round_trip_keeps_only_bounded_public_evidence() -> None:
+    document_id, chunk_id = uuid4(), uuid4()
+    evidence = GroundingEvidence(
+        citation_id=f"knowledge:{document_id}:{chunk_id}",
+        document_id=document_id,
+        chunk_id=chunk_id,
+        source="notes.txt",
+        page_number=None,
+        ordinal=2,
+        excerpt="bounded public excerpt",
+        lexical_rank=1,
+        fusion_score=1 / 61,
+    )
+    state = AgentGraphState(
+        goal=PlanningGoal(objective="Learn"),
+        context=AgentContextSnapshot(
+            projects=ProjectListResponse(
+                items=[], page=1, page_size=20, total=0, pages=0
+            ),
+            tasks=TaskListResponse(items=[], page=1, page_size=20, total=0, pages=0),
+            knowledge=GroundedKnowledgeContext(evidence=(evidence,)),
+        ),
+    )
+
+    restored = AgentGraphState.model_validate_json(state.model_dump_json())
+
+    assert restored == state
+    serialized = restored.model_dump_json()
+    assert evidence.citation_id in serialized
+    for forbidden in (
+        "embedding",
+        "search_vector",
+        "session",
+        "repository",
+        "sql",
+        "provider",
+        "complete_document",
+    ):
+        assert forbidden not in serialized.lower()

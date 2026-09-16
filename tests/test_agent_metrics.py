@@ -29,7 +29,7 @@ from app.schemas.task import (
 )
 from tests.fakes.agent_provider import ScriptedAgentProvider, ScriptedStream
 
-FINAL_RESULT = """{"prompt_version":"study-plan.v1","status":"completed","plan":{"summary":"Safe plan","steps":[{"step_key":"step_1","position":1,"title":"Study","description":"Read","success_criteria":"Notes exist"}]}}"""
+FINAL_RESULT = """{"prompt_version":"study-plan.v2","status":"completed","plan":{"summary":"Safe plan","steps":[{"step_key":"step_1","position":1,"title":"Study","description":"Read","success_criteria":"Notes exist"}]}}"""
 
 
 class EmptyGateway:
@@ -70,7 +70,7 @@ def test_usage_aggregation_preserves_missing_and_sums_known_values() -> None:
 
 def test_metrics_are_exact_immutable_serializable_and_redacted() -> None:
     metrics = build_run_metrics(
-        prompt_version="study-plan.v1",
+        prompt_version="study-plan.v2",
         outcome=AgentRunOutcome.SUCCEEDED,
         model_round_count=2,
         provider_attempt_count=2,
@@ -137,7 +137,7 @@ def test_loop_reports_round_tool_usage_and_fake_records_only_safe_metadata() -> 
         clock=lambda: next(ticks),
     )
     assert execution.metrics == AgentRunMetrics(
-        prompt_version="study-plan.v1",
+        prompt_version="study-plan.v2",
         outcome=AgentRunOutcome.SUCCEEDED,
         model_round_count=2,
         provider_attempt_count=2,

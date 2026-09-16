@@ -91,6 +91,7 @@ def test_read_allowlist_and_definitions_are_exact_and_deterministic() -> None:
     assert tuple(definition.name for definition in first) == (
         "list_projects",
         "list_tasks",
+        "search_knowledge",
     )
     assert all(definition.description for definition in first)
     assert all(

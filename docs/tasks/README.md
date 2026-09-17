@@ -63,7 +63,17 @@ workflow 测试当成远端 CI 通过。
 
 当前保留全部前置实现和工程规划文档。
 原任务文档保留执行范围与验收要求；Completed 的完成证据以 roadmap 为准。
-审批 proposal 预览 P0 已登记为 [待排期安全 backlog](../roadmap.md#unscheduled-security-backlog)，
-尚未实现或编号。
+审批 proposal 预览 P0 已由
+[Security P0.1](security-p0-approval-preview.md) 完成；它保持独立 endpoint、现有审批
+POST 与数据库 schema 不变。
 
 不得自行 commit、push，或开始 MCP、多 Agent、Version 2 与其他后续实现。
+
+## 下一项工程任务
+
+| Task | 状态 | 前置依赖 | 一句话可见成果 |
+| --- | --- | --- | --- |
+| [Security P0.1 — Approval preview](security-p0-approval-preview.md) | Completed | Stage 12、R5、R6 | Owner 在审批前读取与 revision/fingerprint/实际执行一致的完整、有界、类型化 proposal preview。 |
+
+该 Task 已按 owner 确认的 endpoint、公开字段和 65,536-byte fail-closed 边界完成并通过
+真实 PostgreSQL integration；完成不授权开始 MCP、多 Agent、Version 2 或生产部署。

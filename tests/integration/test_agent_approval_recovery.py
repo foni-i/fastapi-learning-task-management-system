@@ -20,11 +20,12 @@ from app.agent.checkpointing import open_postgres_checkpointer
 from app.agent.context import AgentRuntimeContext
 from app.agent.evaluation import EvaluationDatabaseObservationV2
 from app.agent.graph import AgentCheckpointStatus, AgentWorkflow, build_agent_graph
+from app.agent.nodes.approval import BatchCreateTasksApprovalPreview
 from app.agent.nodes.finalization import verify_result
 from app.agent.providers import ProviderRequest, ProviderResponse
 from app.agent.schemas import STUDY_PLAN_PROMPT_VERSION, PlanningGoal
 from app.agent.state import AgentGraphInput, AgentGraphState
-from app.core.exceptions import AgentRunNotFoundError
+from app.core.exceptions import AgentRunConflictError, AgentRunNotFoundError
 from app.models import AgentApproval, AgentRun, AgentThread, Project, Task, User
 from app.models.agent_tool_execution import (
     AgentToolExecution,
@@ -39,7 +40,11 @@ from app.schemas.agent_run import (
 from app.schemas.agent_tool import AgentToolMutationResult
 from app.schemas.task import TaskCreate
 from app.services.agent_tool_executions import AgentToolExecutionCoordinator
-from app.services.agent_workflow import start_agent_run, submit_agent_approval
+from app.services.agent_workflow import (
+    get_agent_approval_preview,
+    start_agent_run,
+    submit_agent_approval,
+)
 from app.services.tasks import create_task_batch
 from tests.integration.test_agent_interrupt_resume import (
     DurableWorkflowFactory,
@@ -329,6 +334,91 @@ def test_post_commit_termination_rebuild_recovers_exact_submission(
         _drop_checkpoint_schema(integration_engine, schema_name)
 
 
+def test_request_changes_makes_old_preview_stale_and_exposes_new_revision(
+    integration_engine: Engine,
+    test_database_url: URL,
+) -> None:
+    schema_name, checkpoint_url = _prepare_checkpoint_schema(
+        integration_engine,
+        test_database_url,
+        "agent_preview_revision",
+    )
+    factory = sessionmaker(
+        bind=integration_engine,
+        class_=Session,
+        expire_on_commit=False,
+    )
+    owner = _create_user(factory)
+    run_id: UUID | None = None
+    try:
+        workflow_factory = DurableWorkflowFactory(checkpoint_url)
+        with factory() as session:
+            started = start_agent_run(
+                AgentRunStartRequest(
+                    goal=PlanningGoal(objective="Revise the persisted plan")
+                ),
+                owner.id,
+                session,
+                workflow_factory=workflow_factory,
+            )
+        run_id = started.run.id
+        with factory() as session:
+            old_preview = get_agent_approval_preview(
+                run_id,
+                owner.id,
+                session,
+                workflow_factory=workflow_factory,
+            )
+        change_submission = AgentApprovalSubmission(
+            revision=old_preview.revision,
+            proposal_fingerprint=old_preview.proposal_fingerprint,
+            decision=AgentApprovalSubmissionDecision.REQUEST_CHANGES,
+            feedback="Make the plan clearer",
+        )
+        with factory() as session:
+            changed = submit_agent_approval(
+                run_id,
+                change_submission,
+                owner.id,
+                session,
+                workflow_factory=workflow_factory,
+            )
+        assert changed.approval is not None
+        assert changed.approval.revision == old_preview.revision + 1
+
+        stale_submission = AgentApprovalSubmission(
+            revision=old_preview.revision,
+            proposal_fingerprint=old_preview.proposal_fingerprint,
+            decision=AgentApprovalSubmissionDecision.APPROVED,
+        )
+        with factory() as session, pytest.raises(AgentRunConflictError):
+            submit_agent_approval(
+                run_id,
+                stale_submission,
+                owner.id,
+                session,
+                workflow_factory=workflow_factory,
+            )
+        with factory() as session:
+            new_preview = get_agent_approval_preview(
+                run_id,
+                owner.id,
+                session,
+                workflow_factory=workflow_factory,
+            )
+        assert new_preview.revision == old_preview.revision + 1
+        assert new_preview.proposal_fingerprint == changed.approval.proposal_fingerprint
+    finally:
+        with factory.begin() as session:
+            session.execute(
+                delete(AgentApproval).where(AgentApproval.user_id == owner.id)
+            )
+            session.execute(delete(AgentRun).where(AgentRun.user_id == owner.id))
+            session.execute(delete(AgentThread).where(AgentThread.user_id == owner.id))
+            session.execute(delete(User).where(User.id == owner.id))
+        _drop_checkpoint_schema(integration_engine, schema_name)
+
+
 class BatchProvider:
     def __init__(self, project_id: UUID) -> None:
         self._project_id = project_id
@@ -464,6 +554,7 @@ def test_competing_recovery_executes_high_impact_domain_write_once(
         expire_on_commit=False,
     )
     owner = _create_user(factory)
+    other = _create_user(factory)
     with factory.begin() as session:
         project = Project(user_id=owner.id, name="Recovery project")
         session.add(project)
@@ -488,9 +579,40 @@ def test_competing_recovery_executes_high_impact_domain_write_once(
             )
         run_id = started.run.id
         assert started.approval is not None
+
+        preview_factory = BatchWorkflowFactory(
+            checkpoint_url,
+            project_id,
+            gateway,
+            factory,
+        )
+        with factory() as session:
+            preview = get_agent_approval_preview(
+                run_id,
+                owner.id,
+                session,
+                workflow_factory=preview_factory,
+            )
+        assert preview.revision == started.approval.revision
+        assert preview.proposal_fingerprint == started.approval.proposal_fingerprint
+        assert len(preview.actions) == 1
+        preview_action = preview.actions[0]
+        assert isinstance(preview_action, BatchCreateTasksApprovalPreview)
+        assert [task.title for task in preview_action.tasks] == [
+            "Recovered 1",
+            "Recovered 2",
+        ]
+        with factory() as session, pytest.raises(AgentRunNotFoundError):
+            get_agent_approval_preview(
+                run_id,
+                other.id,
+                session,
+                workflow_factory=preview_factory,
+            )
+
         submission = AgentApprovalSubmission(
-            revision=started.approval.revision,
-            proposal_fingerprint=started.approval.proposal_fingerprint,
+            revision=preview.revision,
+            proposal_fingerprint=preview.proposal_fingerprint,
             decision=AgentApprovalSubmissionDecision.APPROVED,
         )
         workflow_factory = BatchWorkflowFactory(
@@ -587,5 +709,5 @@ def test_competing_recovery_executes_high_impact_domain_write_once(
             session.execute(delete(AgentThread).where(AgentThread.user_id == owner.id))
             session.execute(delete(Task).where(Task.user_id == owner.id))
             session.execute(delete(Project).where(Project.user_id == owner.id))
-            session.execute(delete(User).where(User.id == owner.id))
+            session.execute(delete(User).where(User.id.in_((owner.id, other.id))))
         _drop_checkpoint_schema(integration_engine, schema_name)

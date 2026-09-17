@@ -7,6 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.agent.nodes.approval import AgentApprovalProposalPreview
 from app.agent.schemas import PlanningGoal
 from app.models.agent_run import (
     AgentApprovalStatus,
@@ -263,6 +264,12 @@ class AgentRunSnapshot(_StrictContract):
     thread: PublicAgentThread
     run: PublicAgentRun
     approval: PublicAgentApproval | None = None
+
+
+class AgentApprovalPreview(AgentApprovalProposalPreview):
+    """Expose one owner-scoped checkpoint proposal without ORM internals."""
+
+    run_id: UUID
 
 
 class AgentRunErrorResponse(_StrictContract):

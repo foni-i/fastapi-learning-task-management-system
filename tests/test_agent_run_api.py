@@ -9,6 +9,20 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.agent.nodes.approval import CreateTaskApprovalPreview
+from app.agent.schemas import (
+    STUDY_PLAN_PROMPT_VERSION,
+    PlanningResult,
+    PlanningStatus,
+    StudyPlan,
+    StudyPlanStep,
+)
+from app.agent.state import (
+    AgentPlanProposal,
+    AgentProposedAction,
+    AgentWriteToolName,
+    fingerprint_plan_proposal,
+)
 from app.api.dependencies import get_current_user
 from app.api.v1.endpoints import agent_runs as endpoint
 from app.core.exceptions import (
@@ -24,12 +38,14 @@ from app.main import app
 from app.models.agent_run import AgentRunStatus, AgentThreadStatus
 from app.models.user import User
 from app.schemas.agent_run import (
+    AgentApprovalPreview,
     AgentRunMetricsSnapshot,
     AgentRunNode,
     AgentRunSnapshot,
     PublicAgentRun,
     PublicAgentThread,
 )
+from app.schemas.task import TaskCreate
 
 NOW = datetime(2026, 9, 4, tzinfo=UTC)
 
@@ -69,6 +85,49 @@ def _snapshot(run_id: UUID | None = None) -> AgentRunSnapshot:
     )
 
 
+def _preview(run_id: UUID) -> AgentApprovalPreview:
+    project_id = UUID("00000000-0000-0000-0000-000000000101")
+    planning_result = PlanningResult(
+        prompt_version=STUDY_PLAN_PROMPT_VERSION,
+        status=PlanningStatus.COMPLETED,
+        plan=StudyPlan(
+            summary="Safe plan",
+            steps=(
+                StudyPlanStep(
+                    step_key="step_1",
+                    position=1,
+                    title="Study",
+                    description="Complete one focused session",
+                    success_criteria="Notes exist",
+                ),
+            ),
+        ),
+    )
+    proposal = AgentPlanProposal(
+        planning_result=planning_result,
+        actions=(
+            AgentProposedAction(
+                action_key="create_1",
+                tool_name=AgentWriteToolName.CREATE_TASK,
+                arguments={"project_id": str(project_id), "title": "Read"},
+            ),
+        ),
+    )
+    return AgentApprovalPreview(
+        run_id=run_id,
+        revision=0,
+        proposal_fingerprint=fingerprint_plan_proposal(proposal),
+        planning_result=planning_result,
+        actions=(
+            CreateTaskApprovalPreview(
+                action_key="create_1",
+                tool_name=AgentWriteToolName.CREATE_TASK,
+                task=TaskCreate(project_id=project_id, title="Read"),
+            ),
+        ),
+    )
+
+
 @pytest.fixture
 def agent_client() -> Iterator[tuple[TestClient, User, Session]]:
     user = _user()
@@ -98,6 +157,7 @@ def unauthenticated_agent_client(client: TestClient) -> Iterator[TestClient]:
     [
         ("post", "/api/v1/agent/runs", {"goal": {"objective": "Learn"}}),
         ("get", f"/api/v1/agent/runs/{uuid4()}", None),
+        ("get", f"/api/v1/agent/runs/{uuid4()}/approval-preview", None),
         ("get", f"/api/v1/agent/runs/{uuid4()}/events", None),
         (
             "post",
@@ -156,6 +216,49 @@ def test_read_delegates_owned_run_and_maps_safe_404(
     missing = client.get(f"/api/v1/agent/runs/{uuid4()}")
     assert missing.status_code == 404
     assert missing.json() == {"detail": AGENT_RUN_NOT_FOUND_MESSAGE}
+
+
+def test_preview_returns_exact_public_payload_and_maps_safe_errors(
+    agent_client: tuple[TestClient, User, Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, user, session = agent_client
+    run_id = uuid4()
+    service = MagicMock(return_value=_preview(run_id))
+    monkeypatch.setattr(endpoint, "get_agent_approval_preview", service)
+
+    response = client.get(f"/api/v1/agent/runs/{run_id}/approval-preview")
+
+    assert response.status_code == 200
+    service.assert_called_once_with(run_id, user.id, session)
+    payload = response.json()
+    assert set(payload) == {
+        "run_id",
+        "revision",
+        "proposal_fingerprint",
+        "planning_result",
+        "actions",
+    }
+    assert payload["actions"][0]["task"] == {
+        "project_id": "00000000-0000-0000-0000-000000000101",
+        "title": "Read",
+    }
+    for forbidden in ("user_id", "arguments", "checkpoint", "reasoning", "api_key"):
+        assert forbidden not in response.text.lower()
+
+    for error, status_code, detail in (
+        (AgentRunNotFoundError("private"), 404, AGENT_RUN_NOT_FOUND_MESSAGE),
+        (AgentRunConflictError("private"), 409, AGENT_RUN_CONFLICT_MESSAGE),
+        (
+            AgentWorkflowUnavailableError("private"),
+            503,
+            AGENT_WORKFLOW_UNAVAILABLE_MESSAGE,
+        ),
+    ):
+        service.side_effect = error
+        failed = client.get(f"/api/v1/agent/runs/{run_id}/approval-preview")
+        assert failed.status_code == status_code
+        assert failed.json() == {"detail": detail}
+        assert "private" not in failed.text
 
 
 def test_approval_delegates_strict_input_and_maps_conflict(
@@ -249,6 +352,7 @@ def test_openapi_exposes_only_public_agent_contracts() -> None:
     assert set(paths["/api/v1/agent/runs"]) == {"post"}
     assert set(paths["/api/v1/agent/runs/{run_id}"]) == {"get"}
     assert set(paths["/api/v1/agent/runs/{run_id}/events"]) == {"get"}
+    assert set(paths["/api/v1/agent/runs/{run_id}/approval-preview"]) == {"get"}
     assert set(paths["/api/v1/agent/runs/{run_id}/approval"]) == {"post"}
     assert set(paths["/api/v1/agent/runs"]["post"]["responses"]) == {
         "201",
@@ -269,6 +373,9 @@ def test_openapi_exposes_only_public_agent_contracts() -> None:
         "409",
         "422",
     }
+    assert set(
+        paths["/api/v1/agent/runs/{run_id}/approval-preview"]["get"]["responses"]
+    ) == {"200", "401", "404", "409", "422", "503"}
     assert set(paths["/api/v1/agent/runs/{run_id}/approval"]["post"]["responses"]) == {
         "200",
         "401",

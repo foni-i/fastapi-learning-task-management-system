@@ -5066,11 +5066,11 @@ after Stage 12 acceptance. They are not part of the first Agent MVP.
 ### Unscheduled security backlog
 
 - **P0 — 所有者作用域的有界审批 proposal 预览与 fingerprint 一致性验证**
-  **Status:** Pending scheduling; not implemented. No formal Task number is
-  assigned. This is an independent public-contract security improvement;
-  existing task numbers and dependencies remain unchanged.
-  Before implementation, confirm the public preview contract. Acceptance must
-  prove all of the following with schema, service, and API tests:
+  **Status (2026-09-17):** Completed as
+  [Security P0.1](tasks/security-p0-approval-preview.md) after owner confirmation
+  of the independent endpoint, public field allowlist, and 65,536-byte fail-closed
+  boundary. The implementation added no migration, dependency, Provider call, or
+  change to the approval POST contract. Acceptance proved all of the following:
   - Public fields use an explicit allowlist; preview item counts and total size
     have enforced bounds.
   - Trusted owner scope applies to every preview read, with cross-user isolation.
@@ -5080,6 +5080,11 @@ after Stage 12 acceptance. They are not part of the first Agent MVP.
     stale revisions are rejected.
   - Sensitive fields are redacted or excluded; credentials, internal payloads,
     and complete private documents never enter the public preview.
+  Focused schema/node/Service/API tests passed 76/76; the complete ordinary suite
+  passed 940 tests with 73 integration/external tests deselected; the guarded real
+  PostgreSQL suite passed 72/72 after upgrade/current/heads/check. Ruff lint,
+  Ruff format, mypy, and `uv lock --check` passed. No remote GitHub Actions run
+  was started for this uncommitted work.
 
 ## Roadmap consistency checklist
 

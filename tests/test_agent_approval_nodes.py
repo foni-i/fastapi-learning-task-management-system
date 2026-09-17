@@ -1,6 +1,7 @@
 """Tests for explicit bounded Agent approval and pure routing."""
 
 from collections.abc import Iterable
+from typing import cast
 from uuid import uuid4
 
 import pytest
@@ -8,13 +9,18 @@ from pydantic import ValidationError
 
 from app.agent.context import AgentRuntimeContext
 from app.agent.nodes.approval import (
+    AGENT_APPROVAL_PREVIEW_INVALID_MESSAGE,
     AGENT_APPROVAL_REQUIRED_MESSAGE,
     AGENT_APPROVAL_UNAVAILABLE_MESSAGE,
+    MAX_APPROVAL_PREVIEW_BYTES,
     PLAN_REVISION_LIMIT_MESSAGE,
+    AgentApprovalInterrupt,
+    AgentApprovalProposalPreview,
     AgentApprovalRequest,
     AgentApprovalRequiredError,
     AgentApprovalResponse,
     AgentApprovalUnavailableError,
+    CreateTaskApprovalPreview,
     request_approval,
 )
 from app.agent.nodes.planning import validate_plan
@@ -42,6 +48,7 @@ from app.agent.state import (
     AgentProposedAction,
     AgentTerminalStatus,
     AgentWriteToolName,
+    fingerprint_plan_proposal,
 )
 from app.schemas.project import ProjectListResponse
 from app.schemas.task import TaskListResponse
@@ -50,14 +57,18 @@ from app.schemas.task import TaskListResponse
 class SequenceDecider:
     def __init__(self, decisions: Iterable[AgentApprovalResponse | Exception]) -> None:
         self.decisions = list(decisions)
-        self.requests: list[AgentApprovalRequest] = []
+        self.requests: list[AgentApprovalInterrupt] = []
 
     def decide(self, request: AgentApprovalRequest) -> AgentApprovalResponse:
-        self.requests.append(request)
+        self.requests.append(cast(AgentApprovalInterrupt, request))
         decision = self.decisions.pop(0)
         if isinstance(decision, Exception):
             raise decision
         return decision
+
+
+def _runtime_context() -> AgentRuntimeContext:
+    return AgentRuntimeContext(user_id=uuid4(), write_tools_enabled=True)
 
 
 def _proposal(*, title: str = "Read") -> AgentPlanProposal:
@@ -128,7 +139,11 @@ def test_approve_and_reject_bind_exact_safe_plan(
     state = _validated_state()
     decider = SequenceDecider([AgentApprovalResponse(decision=decision)])
 
-    update = request_approval(state, decider=decider)
+    update = request_approval(
+        state,
+        decider=decider,
+        runtime_context=_runtime_context(),
+    )
     decided = state.model_copy(update=update)
 
     assert update["approval_decision"] is decision
@@ -142,9 +157,14 @@ def test_approve_and_reject_bind_exact_safe_plan(
     assert request.action_names == (AgentWriteToolName.CREATE_TASK,)
     assert request.action_count == 1
     serialized = request.model_dump_json()
-    assert "project_id" not in serialized
+    assert "project_id" in serialized
+    assert '"title":"Read"' in serialized
     assert "user_id" not in serialized
     assert "arguments" not in serialized
+    assert request.preview.to_plan_proposal() == state.proposal
+    assert request.preview.proposal_fingerprint == fingerprint_plan_proposal(
+        request.preview.to_plan_proposal()
+    )
     if decision is AgentApprovalDecision.REJECTED:
         assert update["terminal_status"] is AgentTerminalStatus.REJECTED
 
@@ -163,6 +183,7 @@ def test_two_change_requests_force_new_proposal_and_validation() -> None:
                     )
                 ]
             ),
+            runtime_context=_runtime_context(),
         )
         state = state.model_copy(update=update)
         assert state.revision_count == expected_revision
@@ -177,6 +198,7 @@ def test_two_change_requests_force_new_proposal_and_validation() -> None:
                 decider=SequenceDecider(
                     [AgentApprovalResponse(decision=AgentApprovalDecision.APPROVED)]
                 ),
+                runtime_context=_runtime_context(),
             )
         state = _validated_state(revision=expected_revision)
 
@@ -194,6 +216,7 @@ def test_third_change_request_fails_closed_without_increment() -> None:
                 )
             ]
         ),
+        runtime_context=_runtime_context(),
     )
 
     assert update["approval_decision"] is AgentApprovalDecision.REJECTED
@@ -219,7 +242,11 @@ def test_unvalidated_stale_or_tampered_plan_never_calls_decider() -> None:
             AgentApprovalRequiredError,
             match=AGENT_APPROVAL_REQUIRED_MESSAGE,
         ):
-            request_approval(state, decider=decider)
+            request_approval(
+                state,
+                decider=decider,
+                runtime_context=_runtime_context(),
+            )
         assert decider.requests == []
 
 
@@ -258,6 +285,7 @@ def test_model_proposal_cannot_approve_itself_and_input_state_is_unchanged() -> 
         decider=SequenceDecider(
             [AgentApprovalResponse(decision=AgentApprovalDecision.APPROVED)]
         ),
+        runtime_context=_runtime_context(),
     )
     assert state.model_dump_json() == original
 
@@ -272,6 +300,7 @@ def test_adapter_failure_is_replaced_with_fixed_safe_error() -> None:
         request_approval(
             _validated_state(),
             decider=SequenceDecider([RuntimeError(private_detail)]),
+            runtime_context=_runtime_context(),
         )
 
     assert private_detail not in str(exc_info.value)
@@ -303,6 +332,7 @@ def test_approval_state_round_trip_contains_no_arguments_or_identity() -> None:
         decider=SequenceDecider(
             [AgentApprovalResponse(decision=AgentApprovalDecision.APPROVED)]
         ),
+        runtime_context=_runtime_context(),
     )
     decided = state.model_copy(update=update)
     round_tripped = AgentGraphState.model_validate_json(decided.model_dump_json())
@@ -313,6 +343,93 @@ def test_approval_state_round_trip_contains_no_arguments_or_identity() -> None:
     assert "user_id" not in serialized_update
     assert "api_key" not in serialized_update
     assert "reasoning" not in serialized_update
+
+
+def test_preview_rejects_tampering_and_enforces_utf8_byte_cap() -> None:
+    state = _validated_state()
+    decider = SequenceDecider(
+        [AgentApprovalResponse(decision=AgentApprovalDecision.APPROVED)]
+    )
+    request_approval(
+        state,
+        decider=decider,
+        runtime_context=_runtime_context(),
+    )
+    preview = decider.requests[0].preview
+    assert len(preview.canonical_json().encode("utf-8")) <= (MAX_APPROVAL_PREVIEW_BYTES)
+
+    action = preview.actions[0]
+    assert isinstance(action, CreateTaskApprovalPreview)
+    with pytest.raises(ValidationError, match=AGENT_APPROVAL_PREVIEW_INVALID_MESSAGE):
+        AgentApprovalProposalPreview(
+            revision=preview.revision,
+            proposal_fingerprint=preview.proposal_fingerprint,
+            planning_result=preview.planning_result,
+            actions=(
+                action.model_copy(
+                    update={"task": action.task.model_copy(update={"title": "Changed"})}
+                ),
+            ),
+        )
+
+
+def test_oversize_preview_fails_closed_before_decider_without_truncation() -> None:
+    project_id = uuid4()
+    proposal = AgentPlanProposal(
+        planning_result=PlanningResult(
+            prompt_version=STUDY_PLAN_PROMPT_VERSION,
+            status=PlanningStatus.COMPLETED,
+            plan=StudyPlan(
+                summary="s" * 1_000,
+                steps=tuple(
+                    StudyPlanStep(
+                        step_key=f"step_{position}",
+                        position=position,
+                        title="t" * 200,
+                        description="d" * 1_000,
+                        success_criteria="c" * 500,
+                    )
+                    for position in range(1, 21)
+                ),
+            ),
+        ),
+        actions=(
+            AgentProposedAction(
+                action_key="batch_1",
+                tool_name=AgentWriteToolName.BATCH_CREATE_TASKS,
+                arguments={
+                    "tasks": [
+                        {
+                            "project_id": str(project_id),
+                            "title": f"Task {index}",
+                            "description": "x" * 5_000,
+                        }
+                        for index in range(10)
+                    ]
+                },
+            ),
+        ),
+    )
+    state = _validated_state().model_copy(
+        update={"proposal": proposal, "validation": None}
+    )
+    context = _runtime_context()
+    state = state.model_copy(update=validate_plan(state, runtime_context=context))
+    decider = SequenceDecider(
+        [AgentApprovalResponse(decision=AgentApprovalDecision.APPROVED)]
+    )
+
+    with pytest.raises(
+        AgentApprovalRequiredError,
+        match=AGENT_APPROVAL_PREVIEW_INVALID_MESSAGE,
+    ):
+        request_approval(
+            state,
+            decider=decider,
+            runtime_context=context,
+        )
+
+    assert decider.requests == []
 
 
 def test_approval_node_has_no_execution_or_persistence_dependency() -> None:

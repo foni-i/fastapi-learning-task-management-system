@@ -151,7 +151,13 @@ def _approved_state(*, action_count: int = 1) -> tuple[AgentGraphState, UUID]:
     state = state.model_copy(
         update=validate_plan(state, runtime_context=runtime_context)
     )
-    state = state.model_copy(update=request_approval(state, decider=Approver()))
+    state = state.model_copy(
+        update=request_approval(
+            state,
+            decider=Approver(),
+            runtime_context=runtime_context,
+        )
+    )
     return state, user_id
 
 
@@ -183,7 +189,11 @@ def _approved_high_impact_state() -> tuple[AgentGraphState, UUID]:
         update=validate_plan(unapproved, runtime_context=context)
     )
     return validated.model_copy(
-        update=request_approval(validated, decider=Approver())
+        update=request_approval(
+            validated,
+            decider=Approver(),
+            runtime_context=context,
+        )
     ), user_id
 
 

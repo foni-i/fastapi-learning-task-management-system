@@ -19,6 +19,7 @@ from app.core.exceptions import (
 from app.db.session import get_session
 from app.models.user import User
 from app.schemas.agent_run import (
+    AgentApprovalPreview,
     AgentApprovalSubmission,
     AgentRunErrorResponse,
     AgentRunSnapshot,
@@ -34,6 +35,7 @@ from app.services.agent_events import (
     resume_after_event,
 )
 from app.services.agent_workflow import (
+    get_agent_approval_preview,
     get_agent_run_snapshot,
     start_agent_run,
     submit_agent_approval,
@@ -108,6 +110,32 @@ def read_run(
         return get_agent_run_snapshot(run_id, current_user.id, session)
     except AgentRunNotFoundError:
         raise _not_found() from None
+
+
+@router.get(
+    "/runs/{run_id}/approval-preview",
+    response_model=AgentApprovalPreview,
+    response_model_exclude_unset=True,
+    responses={
+        status.HTTP_401_UNAUTHORIZED: AUTHENTICATION_RESPONSE,
+        status.HTTP_404_NOT_FOUND: NOT_FOUND_RESPONSE,
+        status.HTTP_409_CONFLICT: CONFLICT_RESPONSE,
+        status.HTTP_503_SERVICE_UNAVAILABLE: UNAVAILABLE_RESPONSE,
+    },
+)
+def read_approval_preview(
+    run_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[Session, Depends(get_session)],
+) -> AgentApprovalPreview:
+    try:
+        return get_agent_approval_preview(run_id, current_user.id, session)
+    except AgentRunNotFoundError:
+        raise _not_found() from None
+    except AgentRunConflictError:
+        raise _conflict() from None
+    except AgentWorkflowUnavailableError:
+        raise _unavailable() from None
 
 
 @router.get(

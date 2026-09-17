@@ -47,6 +47,7 @@ from app.repositories.agent_recovery import (
 )
 from app.repositories.agent_runs import AgentRunRepository
 from app.schemas.agent_run import (
+    AgentApprovalPreview,
     AgentApprovalSubmission,
     AgentRunSnapshot,
     AgentRunStartRequest,
@@ -278,6 +279,102 @@ def get_agent_run_snapshot(
     """Read one owner-scoped safe snapshot without transaction mutation."""
 
     return _snapshot(repository_factory(session), run_id=run_id, user_id=user_id)
+
+
+def get_agent_approval_preview(
+    run_id: UUID,
+    user_id: UUID,
+    session: Session,
+    *,
+    repository_factory: RepositoryFactory = AgentRunRepository,
+    workflow_factory: WorkflowFactory = open_runtime_workflow,
+    trace_sink: TraceSink = NOOP_TRACE_SINK,
+    recovery_lock_factory: RecoveryLockFactory = open_agent_recovery_lock,
+) -> AgentApprovalPreview:
+    """Read the exact pending proposal under the durable recovery lock."""
+
+    try:
+        repository = repository_factory(session)
+        owned_run = repository.get_owned_run(run_id=run_id, user_id=user_id)
+        if owned_run is None:
+            raise AgentRunNotFoundError(AGENT_RUN_NOT_FOUND_MESSAGE)
+        owned_thread = repository.get_owned_thread(
+            thread_id=owned_run.thread_id,
+            user_id=user_id,
+        )
+        if owned_thread is None:
+            raise AgentRunNotFoundError(AGENT_RUN_NOT_FOUND_MESSAGE)
+
+        with recovery_lock_factory(session, run_id):
+            session.expire_all()
+            run = repository.get_owned_run(run_id=run_id, user_id=user_id)
+            if run is None:
+                raise AgentRunNotFoundError(AGENT_RUN_NOT_FOUND_MESSAGE)
+            thread = repository.get_owned_thread(
+                thread_id=run.thread_id,
+                user_id=user_id,
+            )
+            approval = repository.get_latest_owned_approval(
+                run_id=run_id,
+                user_id=user_id,
+            )
+            if thread is None:
+                raise AgentRunNotFoundError(AGENT_RUN_NOT_FOUND_MESSAGE)
+            if (
+                run.status != AgentRunStatus.PENDING_APPROVAL.value
+                or approval is None
+                or approval.decision != AgentApprovalStatus.PENDING.value
+            ):
+                raise AgentRunConflictError(AGENT_RUN_CONFLICT_MESSAGE)
+
+            with _open_workflow(
+                workflow_factory,
+                user_id=user_id,
+                run_id=run.id,
+                trace_sink=trace_sink,
+            ) as workflow:
+                inspection = workflow.inspect_durable(thread_id=thread.id)
+
+            if inspection.status is AgentCheckpointStatus.INCONSISTENT:
+                raise AgentWorkflowUnavailableError(AGENT_WORKFLOW_UNAVAILABLE_MESSAGE)
+            if inspection.status is not AgentCheckpointStatus.PENDING_INTERRUPT:
+                raise AgentRunConflictError(AGENT_RUN_CONFLICT_MESSAGE)
+            checkpoint_approval = inspection.approval
+            if (
+                checkpoint_approval is None
+                or checkpoint_approval.revision != approval.revision
+                or checkpoint_approval.proposal_fingerprint
+                != approval.proposal_fingerprint
+            ):
+                raise AgentRunConflictError(AGENT_RUN_CONFLICT_MESSAGE)
+
+            preview = AgentApprovalPreview(
+                run_id=run.id,
+                **checkpoint_approval.preview.model_dump(
+                    mode="python",
+                    exclude_unset=True,
+                ),
+            )
+        session.rollback()
+        return preview
+    except Exception as exc:
+        session.rollback()
+        if isinstance(
+            exc,
+            (
+                AgentRunNotFoundError,
+                AgentRunConflictError,
+                AgentWorkflowUnavailableError,
+            ),
+        ):
+            raise
+        if isinstance(exc, AgentRecoveryLockError):
+            raise AgentWorkflowUnavailableError(
+                AGENT_WORKFLOW_UNAVAILABLE_MESSAGE
+            ) from None
+        raise AgentWorkflowUnavailableError(
+            AGENT_WORKFLOW_UNAVAILABLE_MESSAGE
+        ) from None
 
 
 def _stored_response(approval: AgentApproval) -> AgentApprovalResponse:

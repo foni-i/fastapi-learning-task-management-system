@@ -685,7 +685,12 @@ def test_durable_graph_interrupts_with_safe_exact_approval_payload() -> None:
         "action_count",
         "revision",
         "proposal_fingerprint",
+        "preview",
     }
+    assert progress.approval.preview.proposal_fingerprint == (
+        progress.approval.proposal_fingerprint
+    )
+    assert progress.approval.preview.actions[0].tool_name.value == "create_task"
     serialized = progress.approval.model_dump_json().lower()
     assert str(user_id) not in serialized
     for forbidden in ("user_id", "arguments", "checkpoint", "reasoning", "token"):

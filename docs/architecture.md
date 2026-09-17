@@ -269,6 +269,15 @@ normalized citation IDs. A changed claim, action, or citation therefore requires
 a new validation and approval. An unvalidated proposal cannot reach
 `execute_tasks`.
 
+Before deciding, an authenticated owner can read
+`GET /api/v1/agent/runs/{run_id}/approval-preview`. The Service verifies the
+owner-scoped pending product approval under the same run-scoped recovery lock,
+inspects only LangGraph's public snapshot, and returns the complete typed public
+plan and Task write fields carried by that exact interrupt. The preview can
+losslessly rebuild the canonical proposal fingerprint, preserves update
+omitted/null semantics, and is capped at 65,536 UTF-8 bytes with no truncation.
+The GET neither commits product data nor advances the checkpoint.
+
 Durable approval recovery treats the persisted approval as the resume intent.
 Before accepting or replaying a submission, the Service holds a PostgreSQL
 transaction advisory lock derived deterministically from the complete Run UUID

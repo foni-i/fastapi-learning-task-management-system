@@ -522,8 +522,19 @@ def build_agent_graph(
     def approval_node(state: AgentGraphState) -> StateUpdate:
         try:
             if durable_approval:
-                return dict(interrupt_for_approval(state))
-            return dict(request_approval(state, decider=approval_decider))
+                return dict(
+                    interrupt_for_approval(
+                        state,
+                        runtime_context=runtime_context,
+                    )
+                )
+            return dict(
+                request_approval(
+                    state,
+                    decider=approval_decider,
+                    runtime_context=runtime_context,
+                )
+            )
         except GraphInterrupt:
             raise
         except Exception:

@@ -16,9 +16,27 @@ from app.agent.graph import (
     AgentWorkflowProgress,
 )
 from app.agent.metrics import AgentRunMetrics, AgentRunOutcome
-from app.agent.nodes.approval import AgentApprovalInterrupt
-from app.agent.schemas import PlanningGoal
-from app.agent.state import AgentGraphOutput, AgentTerminalStatus, AgentWriteToolName
+from app.agent.nodes.approval import (
+    AgentApprovalInterrupt,
+    AgentApprovalProposalPreview,
+    CreateTaskApprovalPreview,
+)
+from app.agent.schemas import (
+    STUDY_PLAN_PROMPT_VERSION,
+    PlanningGoal,
+    PlanningResult,
+    PlanningStatus,
+    StudyPlan,
+    StudyPlanStep,
+)
+from app.agent.state import (
+    AgentGraphOutput,
+    AgentPlanProposal,
+    AgentProposedAction,
+    AgentTerminalStatus,
+    AgentWriteToolName,
+    fingerprint_plan_proposal,
+)
 from app.core.exceptions import (
     AGENT_WORKFLOW_UNAVAILABLE_MESSAGE,
     AgentRunConflictError,
@@ -32,26 +50,63 @@ from app.schemas.agent_run import (
     AgentApprovalSubmissionDecision,
     AgentRunStartRequest,
 )
+from app.schemas.task import TaskCreate
 from app.services.agent_workflow import (
+    get_agent_approval_preview,
     get_agent_run_snapshot,
     start_agent_run,
     submit_agent_approval,
 )
 
 NOW = datetime(2026, 9, 4, tzinfo=UTC)
-FINGERPRINT = "a" * 64
+PROJECT_ID = UUID("00000000-0000-0000-0000-000000000101")
+
+
+def _proposal(*, title: str = "Previewed task") -> AgentPlanProposal:
+    return AgentPlanProposal(
+        planning_result=PlanningResult(
+            prompt_version=STUDY_PLAN_PROMPT_VERSION,
+            status=PlanningStatus.COMPLETED,
+            plan=StudyPlan(
+                summary="Safe plan",
+                steps=(
+                    StudyPlanStep(
+                        step_key="step_1",
+                        position=1,
+                        title="Study",
+                        description="Complete one focused session",
+                        success_criteria="Notes exist",
+                    ),
+                ),
+            ),
+        ),
+        actions=(
+            AgentProposedAction(
+                action_key="create_1",
+                tool_name=AgentWriteToolName.CREATE_TASK,
+                arguments={"project_id": str(PROJECT_ID), "title": title},
+            ),
+        ),
+    )
+
+
+FINGERPRINT = fingerprint_plan_proposal(_proposal())
 
 
 class RecordingSession:
     def __init__(self) -> None:
         self.commits = 0
         self.rollbacks = 0
+        self.expirations = 0
 
     def commit(self) -> None:
         self.commits += 1
 
     def rollback(self) -> None:
         self.rollbacks += 1
+
+    def expire_all(self) -> None:
+        self.expirations += 1
 
 
 class MemoryRepository:
@@ -250,9 +305,9 @@ class UnavailableWorkflowContext(AbstractContextManager[AgentWorkflow]):
         return None
 
 
-def _pending(
-    revision: int = 0, fingerprint: str = FINGERPRINT
-) -> AgentWorkflowProgress:
+def _pending(revision: int = 0, title: str = "Previewed task") -> AgentWorkflowProgress:
+    proposal = _proposal(title=title)
+    fingerprint = fingerprint_plan_proposal(proposal)
     return AgentWorkflowProgress(
         approval=AgentApprovalInterrupt(
             plan_summary="Safe plan",
@@ -260,6 +315,21 @@ def _pending(
             action_count=1,
             revision=revision,
             proposal_fingerprint=fingerprint,
+            preview=AgentApprovalProposalPreview(
+                revision=revision,
+                proposal_fingerprint=fingerprint,
+                planning_result=proposal.planning_result,
+                actions=(
+                    CreateTaskApprovalPreview(
+                        action_key="create_1",
+                        tool_name=AgentWriteToolName.CREATE_TASK,
+                        task=TaskCreate(
+                            project_id=PROJECT_ID,
+                            title=title,
+                        ),
+                    ),
+                ),
+            ),
         )
     )
 
@@ -382,6 +452,134 @@ def test_owned_snapshot_is_read_only_and_foreign_is_safe_not_found() -> None:
         )
 
 
+def test_owned_pending_preview_is_exact_and_read_only() -> None:
+    user_id, thread_id, run_id, repository = _started()
+    session = RecordingSession()
+    workflow = ScriptedWorkflow()
+
+    preview = get_agent_approval_preview(
+        run_id,
+        user_id,
+        cast(Session, session),
+        repository_factory=_repo_factory(repository),
+        workflow_factory=_factory(workflow),
+        recovery_lock_factory=_recovery_lock,
+    )
+
+    assert preview.run_id == run_id
+    assert preview.revision == 0
+    assert preview.proposal_fingerprint == FINGERPRINT
+    assert preview.to_plan_proposal() == _proposal()
+    assert workflow.thread_ids == [thread_id]
+    assert session.commits == 0
+    assert session.rollbacks == 1
+    assert session.expirations == 1
+    assert "user_id" not in preview.model_dump_json()
+
+
+def test_foreign_preview_is_404_before_lock_or_checkpoint_open() -> None:
+    _user_id, _thread_id, run_id, repository = _started()
+    lock_calls: list[UUID] = []
+
+    @contextmanager
+    def forbidden_lock(_session: Session, _run_id: UUID) -> Iterator[None]:
+        lock_calls.append(_run_id)
+        yield
+
+    with pytest.raises(AgentRunNotFoundError):
+        get_agent_approval_preview(
+            run_id,
+            uuid4(),
+            cast(Session, RecordingSession()),
+            repository_factory=_repo_factory(repository),
+            workflow_factory=cast(
+                Callable[[UUID], AbstractContextManager[AgentWorkflow]],
+                lambda _user_id: pytest.fail("must not inspect checkpoint"),
+            ),
+            recovery_lock_factory=forbidden_lock,
+        )
+    assert lock_calls == []
+
+
+@pytest.mark.parametrize(
+    "inspection",
+    [
+        AgentCheckpointInspection(AgentCheckpointStatus.TERMINAL),
+        AgentCheckpointInspection(AgentCheckpointStatus.CONTINUABLE),
+    ],
+)
+def test_non_pending_preview_checkpoint_is_conflict(
+    inspection: AgentCheckpointInspection,
+) -> None:
+    user_id, _thread_id, run_id, repository = _started()
+    with pytest.raises(AgentRunConflictError):
+        get_agent_approval_preview(
+            run_id,
+            user_id,
+            cast(Session, RecordingSession()),
+            repository_factory=_repo_factory(repository),
+            workflow_factory=_factory(ScriptedWorkflow(inspection=inspection)),
+            recovery_lock_factory=_recovery_lock,
+        )
+
+
+def test_inconsistent_preview_checkpoint_is_safe_unavailable() -> None:
+    user_id, _thread_id, run_id, repository = _started()
+    with pytest.raises(
+        AgentWorkflowUnavailableError,
+        match=AGENT_WORKFLOW_UNAVAILABLE_MESSAGE,
+    ):
+        get_agent_approval_preview(
+            run_id,
+            user_id,
+            cast(Session, RecordingSession()),
+            repository_factory=_repo_factory(repository),
+            workflow_factory=_factory(
+                ScriptedWorkflow(
+                    inspection=AgentCheckpointInspection(
+                        AgentCheckpointStatus.INCONSISTENT
+                    )
+                )
+            ),
+            recovery_lock_factory=_recovery_lock,
+        )
+
+
+def test_preview_product_or_checkpoint_mismatch_is_conflict() -> None:
+    user_id, _thread_id, run_id, repository = _started()
+    assert repository.run is not None
+    repository.run.status = "SUCCEEDED"
+    with pytest.raises(AgentRunConflictError):
+        get_agent_approval_preview(
+            run_id,
+            user_id,
+            cast(Session, RecordingSession()),
+            repository_factory=_repo_factory(repository),
+            workflow_factory=cast(
+                Callable[[UUID], AbstractContextManager[AgentWorkflow]],
+                lambda _user_id: pytest.fail("must not inspect decided run"),
+            ),
+            recovery_lock_factory=_recovery_lock,
+        )
+
+    repository.run.status = "PENDING_APPROVAL"
+    mismatched = ScriptedWorkflow(
+        inspection=AgentCheckpointInspection(
+            AgentCheckpointStatus.PENDING_INTERRUPT,
+            approval=_pending(title="Different proposal").approval,
+        )
+    )
+    with pytest.raises(AgentRunConflictError):
+        get_agent_approval_preview(
+            run_id,
+            user_id,
+            cast(Session, RecordingSession()),
+            repository_factory=_repo_factory(repository),
+            workflow_factory=_factory(mismatched),
+            recovery_lock_factory=_recovery_lock,
+        )
+
+
 @pytest.mark.parametrize(
     ("decision", "terminal"),
     [
@@ -432,7 +630,9 @@ def test_request_changes_creates_next_pending_revision() -> None:
         user_id,
         cast(Session, session),
         repository_factory=_repo_factory(repository),
-        workflow_factory=_factory(ScriptedWorkflow(resume=_pending(1, "b" * 64))),
+        workflow_factory=_factory(
+            ScriptedWorkflow(resume=_pending(1, "Revised previewed task"))
+        ),
         id_factory=_ids(uuid4()),
         clock=lambda: NOW,
         recovery_lock_factory=_recovery_lock,

@@ -2,13 +2,36 @@
 
 from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
-from uuid import uuid4
+from typing import cast
+from uuid import UUID, uuid4
 
 import pytest
-from pydantic import ValidationError
+from pydantic import JsonValue, ValidationError
 
+from app.agent.nodes.approval import (
+    AGENT_APPROVAL_PREVIEW_INVALID_MESSAGE,
+    MAX_APPROVAL_PREVIEW_BYTES,
+    BatchCreateTasksApprovalPreview,
+    CreateTaskApprovalPreview,
+    DeleteTaskApprovalPreview,
+    UpdateTaskApprovalPreview,
+)
+from app.agent.schemas import (
+    STUDY_PLAN_PROMPT_VERSION,
+    PlanningResult,
+    PlanningStatus,
+    StudyPlan,
+    StudyPlanStep,
+)
+from app.agent.state import (
+    AgentPlanProposal,
+    AgentProposedAction,
+    AgentWriteToolName,
+    fingerprint_plan_proposal,
+)
 from app.models.agent_run import AgentApprovalStatus, AgentRunStatus, AgentThreadStatus
 from app.schemas.agent_run import (
+    AgentApprovalPreview,
     AgentApprovalSubmission,
     AgentApprovalSubmissionDecision,
     AgentRunMetricsSnapshot,
@@ -21,8 +44,28 @@ from app.schemas.agent_run import (
     PublicAgentRun,
     PublicAgentThread,
 )
+from app.schemas.task import TaskCreate, TaskUpdate
 
 NOW = datetime(2026, 9, 4, tzinfo=UTC)
+
+
+def _planning_result() -> PlanningResult:
+    return PlanningResult(
+        prompt_version=STUDY_PLAN_PROMPT_VERSION,
+        status=PlanningStatus.COMPLETED,
+        plan=StudyPlan(
+            summary="Safe plan",
+            steps=(
+                StudyPlanStep(
+                    step_key="step_1",
+                    position=1,
+                    title="Study",
+                    description="Complete one focused session",
+                    success_criteria="Notes exist",
+                ),
+            ),
+        ),
+    )
 
 
 def test_thread_create_is_strict_bounded_and_trimmed() -> None:
@@ -265,6 +308,170 @@ def test_run_snapshot_contains_only_public_product_records() -> None:
     serialized = snapshot.model_dump_json().lower()
     for forbidden in ("user_id", "checkpoint", "arguments", "raw_prompt", "reasoning"):
         assert forbidden not in serialized
+
+
+def test_approval_preview_is_typed_exact_and_preserves_update_null() -> None:
+    project_id, task_id = uuid4(), uuid4()
+    batch_tasks: list[dict[str, object]] = [
+        {"project_id": str(project_id), "title": "Batch one"},
+        {"project_id": str(project_id), "title": "Batch two"},
+    ]
+    action_payloads: tuple[dict[str, object], ...] = (
+        {
+            "action_key": "create_1",
+            "tool_name": AgentWriteToolName.CREATE_TASK,
+            "arguments": {"project_id": str(project_id), "title": "Create"},
+        },
+        {
+            "action_key": "update_1",
+            "tool_name": AgentWriteToolName.UPDATE_TASK,
+            "arguments": {"task_id": str(task_id), "description": None},
+        },
+        {
+            "action_key": "batch_1",
+            "tool_name": AgentWriteToolName.BATCH_CREATE_TASKS,
+            "arguments": {"tasks": batch_tasks},
+        },
+    )
+    proposal = AgentPlanProposal(
+        planning_result=_planning_result(),
+        actions=tuple(
+            AgentProposedAction.model_validate(item) for item in action_payloads
+        ),
+    )
+    preview = AgentApprovalPreview(
+        run_id=uuid4(),
+        revision=1,
+        proposal_fingerprint=fingerprint_plan_proposal(proposal),
+        planning_result=proposal.planning_result,
+        actions=(
+            CreateTaskApprovalPreview(
+                action_key="create_1",
+                tool_name=AgentWriteToolName.CREATE_TASK,
+                task=TaskCreate.model_validate(action_payloads[0]["arguments"]),
+            ),
+            UpdateTaskApprovalPreview(
+                action_key="update_1",
+                tool_name=AgentWriteToolName.UPDATE_TASK,
+                task_id=task_id,
+                changes=TaskUpdate(description=None),
+            ),
+            BatchCreateTasksApprovalPreview(
+                action_key="batch_1",
+                tool_name=AgentWriteToolName.BATCH_CREATE_TASKS,
+                tasks=tuple(TaskCreate.model_validate(item) for item in batch_tasks),
+            ),
+        ),
+    )
+
+    assert preview.to_plan_proposal() == proposal
+    serialized = preview.model_dump(mode="json", exclude_unset=True)
+    changes = serialized["actions"][1]["changes"]
+    assert changes == {"description": None}
+    serialized_json = preview.model_dump_json().lower()
+    for forbidden in ('"user_id"', '"arguments"', '"checkpoint"', '"session"'):
+        assert forbidden not in serialized_json
+
+    delete_proposal = AgentPlanProposal(
+        planning_result=_planning_result(),
+        actions=(
+            AgentProposedAction(
+                action_key="delete_1",
+                tool_name=AgentWriteToolName.DELETE_TASK,
+                arguments={"task_id": str(task_id)},
+            ),
+        ),
+    )
+    deleted = AgentApprovalPreview(
+        run_id=uuid4(),
+        revision=0,
+        proposal_fingerprint=fingerprint_plan_proposal(delete_proposal),
+        planning_result=delete_proposal.planning_result,
+        actions=(
+            DeleteTaskApprovalPreview(
+                action_key="delete_1",
+                tool_name=AgentWriteToolName.DELETE_TASK,
+                task_id=task_id,
+            ),
+        ),
+    )
+    assert deleted.to_plan_proposal() == delete_proposal
+
+
+def test_approval_preview_enforces_exact_utf8_response_boundary() -> None:
+    run_id = UUID("00000000-0000-0000-0000-000000000201")
+    project_id = UUID("00000000-0000-0000-0000-000000000202")
+    planning_result = PlanningResult(
+        prompt_version=STUDY_PLAN_PROMPT_VERSION,
+        status=PlanningStatus.COMPLETED,
+        plan=StudyPlan(
+            summary="s" * 1_000,
+            steps=tuple(
+                StudyPlanStep(
+                    step_key=f"step_{position}",
+                    position=position,
+                    title="t" * 200,
+                    description="d" * 1_000,
+                    success_criteria="c" * 500,
+                )
+                for position in range(1, 21)
+            ),
+        ),
+    )
+
+    def candidate(variable_length: int, *, validate: bool) -> AgentApprovalPreview:
+        task_payloads: list[dict[str, JsonValue]] = [
+            {
+                "project_id": str(project_id),
+                "title": f"{index}".ljust(300, "t"),
+                "description": "x" * (2_200 if index < 9 else variable_length),
+            }
+            for index in range(10)
+        ]
+        proposal = AgentPlanProposal(
+            planning_result=planning_result,
+            actions=(
+                AgentProposedAction(
+                    action_key="batch_1",
+                    tool_name=AgentWriteToolName.BATCH_CREATE_TASKS,
+                    arguments={"tasks": cast(JsonValue, task_payloads)},
+                ),
+            ),
+        )
+        fingerprint = fingerprint_plan_proposal(proposal)
+        actions = (
+            BatchCreateTasksApprovalPreview(
+                action_key="batch_1",
+                tool_name=AgentWriteToolName.BATCH_CREATE_TASKS,
+                tasks=tuple(
+                    TaskCreate.model_validate(payload) for payload in task_payloads
+                ),
+            ),
+        )
+        if validate:
+            return AgentApprovalPreview(
+                run_id=run_id,
+                revision=0,
+                proposal_fingerprint=fingerprint,
+                planning_result=planning_result,
+                actions=actions,
+            )
+        return AgentApprovalPreview.model_construct(
+            run_id=run_id,
+            revision=0,
+            proposal_fingerprint=fingerprint,
+            planning_result=planning_result,
+            actions=actions,
+        )
+
+    one_byte_length = len(candidate(1, validate=False).canonical_json().encode())
+    exact_variable_length = MAX_APPROVAL_PREVIEW_BYTES - one_byte_length + 1
+    assert 1 <= exact_variable_length < 5_000
+
+    exact = candidate(exact_variable_length, validate=True)
+    assert len(exact.canonical_json().encode()) == MAX_APPROVAL_PREVIEW_BYTES
+    with pytest.raises(ValidationError, match=AGENT_APPROVAL_PREVIEW_INVALID_MESSAGE):
+        candidate(exact_variable_length + 1, validate=True)
 
 
 @pytest.mark.parametrize("field", ["created_at", "updated_at"])

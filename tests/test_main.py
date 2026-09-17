@@ -28,6 +28,7 @@ def test_default_application_is_importable_with_basic_metadata() -> None:
         "/api/v1/tasks/{task_id}/complete",
         "/api/v1/agent/runs",
         "/api/v1/agent/runs/{run_id}",
+        "/api/v1/agent/runs/{run_id}/approval-preview",
         "/api/v1/agent/runs/{run_id}/events",
         "/api/v1/agent/runs/{run_id}/approval",
         "/api/v1/knowledge/documents",

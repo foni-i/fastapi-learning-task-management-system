@@ -411,10 +411,15 @@ $runBody = @{
 $snapshot = Invoke-RestMethod -Method Post -Uri "$api/api/v1/agent/runs" `
     -Headers $headers -ContentType "application/json" -Body $runBody
 
-# When approval is pending, bind the decision to this exact revision and fingerprint.
+# Inspect the complete bounded proposal before deciding.
+$preview = Invoke-RestMethod -Method Get `
+    -Uri "$api/api/v1/agent/runs/$($snapshot.run.id)/approval-preview" `
+    -Headers $headers
+
+# Bind the decision to the exact revision and fingerprint just inspected.
 $approvalBody = @{
-    revision = $snapshot.approval.revision
-    proposal_fingerprint = $snapshot.approval.proposal_fingerprint
+    revision = $preview.revision
+    proposal_fingerprint = $preview.proposal_fingerprint
     decision = "APPROVED"
 } | ConvertTo-Json
 $snapshot = Invoke-RestMethod -Method Post `
@@ -426,8 +431,8 @@ Invoke-WebRequest -Uri "$api/api/v1/agent/runs/$($snapshot.run.id)/events" `
     -Headers $headers
 ```
 
-Run 创建成功为 HTTP 201，读取、审批和 SSE 为 HTTP 200。只有服务端返回非空、状态为
-pending 的 `approval` 时才能构造审批请求；拒绝使用 `REJECTED`，请求修改使用
+Run 创建成功为 HTTP 201，读取、预览、审批和 SSE 为 HTTP 200。只有服务端返回非空、
+状态为 pending 的 `approval` 时才能读取 preview 并构造审批请求；拒绝使用 `REJECTED`，请求修改使用
 `REQUEST_CHANGES` 并额外提供最多 1000 字符的 `feedback`。完成演示后清除当前会话变量：
 
 ```powershell
@@ -814,6 +819,7 @@ HTTP Agent API -> LangGraph node -> Agent Tool -> Domain Service
 | --- | --- | --- |
 | `POST` | `/api/v1/agent/runs` | 创建服务端Thread/Run并执行到审批中断，返回201 |
 | `GET` | `/api/v1/agent/runs/{run_id}` | 读取当前用户拥有的安全Run快照 |
+| `GET` | `/api/v1/agent/runs/{run_id}/approval-preview` | 读取当前待审批 proposal 的完整、有界、类型化公开预览 |
 | `POST` | `/api/v1/agent/runs/{run_id}/approval` | 提交批准、拒绝或修改请求并恢复Run |
 | `GET` | `/api/v1/agent/runs/{run_id}/events` | 获取有序、可恢复的安全SSE进度事件 |
 
@@ -823,6 +829,12 @@ Checkpoint ID。跨用户读取和不存在的Run统一返回安全404；审批�
 revision和proposal fingerprint严格匹配。相同decision及规范化feedback的重试会恢复
 未完成的checkpoint，或在已完成时返回同一安全Run快照；不同revision、fingerprint、
 decision或feedback仍返回409。
+
+审批 preview 只从当前已验证的 durable interrupt 读取，并在同一 run-scoped recovery
+lock 下核对产品 approval 与 checkpoint。它返回公开 planning result 和最多3个按原顺序的
+类型化 Task write action，保留 update 字段的 omitted/null 区别；canonical JSON 最多
+65,536 UTF-8 bytes，超限、无法无损重建 fingerprint 或状态不一致时失败关闭而不截断。
+Preview 不包含身份、凭据、Prompt、文档正文、hidden reasoning、checkpoint ID 或 Tool result。
 
 高影响的 `batch_create_tasks` 和 `delete_task` 由代码固定分类，必须同时满足写Tool
 开关、已验证提案、匹配的持久化审批以及数据库幂等claim。产品审计只持久化有界的

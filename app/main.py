@@ -6,6 +6,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.router import router as root_router
+from app.api.v1.endpoints.auth import AUTH_CACHE_HEADERS, AUTH_CREDENTIAL_PATHS
 from app.core.config import Settings, get_settings
 from app.middleware.request_body_limit import (
     MULTIPART_ENVELOPE_BYTES,
@@ -37,12 +38,37 @@ def _safe_validation_errors(
 
 
 async def _request_validation_exception_handler(
-    _request: Request,
+    request: Request,
     exception: Exception,
 ) -> JSONResponse:
     """Return the standard 422 detail without reflecting submitted passwords."""
 
     assert isinstance(exception, RequestValidationError)
+    if request.url.path in AUTH_CREDENTIAL_PATHS:
+        allowed_fields = {
+            "email",
+            "password",
+            "refresh_token",
+            "current_password",
+            "new_password",
+        }
+        details: list[dict[str, object]] = []
+        for error in exception.errors()[:3]:
+            location = error.get("loc", ())
+            field = location[1] if len(location) == 2 else None
+            safe_location = ["body"]
+            if isinstance(field, str) and field in allowed_fields:
+                safe_location.append(field)
+            details.append(
+                {
+                    "loc": safe_location,
+                    "type": "invalid_request",
+                    "msg": "Invalid authentication request",
+                }
+            )
+        return JSONResponse(
+            status_code=422, content={"detail": details}, headers=AUTH_CACHE_HEADERS
+        )
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         content=jsonable_encoder({"detail": _safe_validation_errors(exception)}),

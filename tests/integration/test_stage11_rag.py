@@ -16,7 +16,7 @@ from app.services.knowledge_retrieval import search_owned_knowledge
 
 pytestmark = pytest.mark.integration
 
-STAGE_11_HEAD = "e3b7c2d9a410"
+PRODUCT_HEAD = "86cd95365562"
 
 
 def _unit_vector(index: int) -> list[float]:
@@ -45,9 +45,7 @@ def test_stage11_catalog_owner_retrieval_and_grounding_contract(
     db_session: Session,
 ) -> None:
     connection = db_session.connection()
-    assert (
-        MigrationContext.configure(connection).get_current_revision() == STAGE_11_HEAD
-    )
+    assert MigrationContext.configure(connection).get_current_revision() == PRODUCT_HEAD
     inspector = inspect(connection)
     assert {"knowledge_documents", "knowledge_document_chunks"}.issubset(
         inspector.get_table_names()

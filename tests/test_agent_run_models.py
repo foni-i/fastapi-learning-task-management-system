@@ -19,6 +19,7 @@ PRODUCT_TABLES = {
     "agent_tool_executions",
     "knowledge_documents",
     "knowledge_document_chunks",
+    "refresh_tokens",
 }
 
 

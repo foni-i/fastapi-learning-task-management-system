@@ -2,7 +2,7 @@
 
 FastAPI STMS 是 StudyFlow Agent 的分阶段后端学习项目。当前已完成 Stage 1～4 的应用、数据库和认证基础，Stage 6～7 的用户私有 Project/Task API，Stage 8～10 的有界单Agent工作流，Stage 11 的安全RAG与离线评估，以及 Stage 12 的可复现工程交付。所有已实现链路使用 FastAPI、Pydantic 2、SQLAlchemy 2 同步 Session、PostgreSQL、Alembic、Argon2id 和固定 HS256 JWT，并有真实 PostgreSQL 端到端测试。
 
-当前尚未实现 Refresh Token、Token轮换/撤销、退出登录、密码修改、管理员、密码找回、grounded claim事实核验、外部Tracing供应商、MCP或多Agent。Agent与Embedding普通测试只使用离线合成Provider；真实外部模型调用必须单独授权，检索citation只表示来源而不保证内容事实为真。
+Stage 5 已完成并经 owner 验收：Refresh Token 摘要存储、原子轮换、双令牌登录、HTTP refresh、单凭据退出，以及密码修改与全部刷新凭据原子吊销。当前仅进行 [Stage 5 checkpoint 提交准备](docs/tasks/stage-5-checkpoint-preparation.md)，不表示已经 commit/push 或通过本次远程 CI。管理员、密码找回、grounded claim事实核验、外部Tracing供应商、MCP或多Agent尚未实现。Agent与Embedding普通测试只使用离线合成Provider；真实外部模型调用必须单独授权，检索citation只表示来源而不保证内容事实为真。
 
 集中式的失败模式、安全保证/非保证、改进优先级和成本公式见
 [`docs/security-and-limitations.md`](docs/security-and-limitations.md)。
@@ -442,16 +442,19 @@ Remove-Variable login, headers, credentials -ErrorAction SilentlyContinue
 
 ## 认证与当前用户 API
 
-Stage 4 完成后公开以下六个方法/路径组合，且不应出现其他产品路由：
+当前健康检查与认证相关方法/路径如下，其他产品路由见后续章节：
 
 | 方法 | 路径 | 结果 |
 | --- | --- | --- |
 | `GET` | `/health/live` | 应用进程存活状态 |
 | `GET` | `/health/ready` | 数据库就绪状态 |
 | `POST` | `/api/v1/auth/register` | 创建最小用户并返回公开字段 |
-| `POST` | `/api/v1/auth/login` | 验证凭据并签发短期 Access Token |
+| `POST` | `/api/v1/auth/login` | 验证凭据并在摘要提交后交付 Access + Refresh Token |
+| `POST` | `/api/v1/auth/refresh` | JSON body 刷新凭据原子轮换并交付双令牌 |
+| `POST` | `/api/v1/auth/logout` | 只吊销所提交的 Refresh Token，幂等空 204 |
 | `GET` | `/api/v1/users/me` | 返回已认证用户的公开字段 |
 | `PATCH` | `/api/v1/users/me` | 只更新已认证用户的规范化邮箱 |
+| `POST` | `/api/v1/users/me/change-password` | 当前密码验证后修改密码并吊销该用户全部刷新凭据，空 204 |
 
 ### 注册请求
 
@@ -532,7 +535,9 @@ POST /api/v1/auth/register
 - 请求依赖在响应路径结束后关闭 Session。
 - 应用层提前查询提供常规重复邮箱错误；并发请求都通过早期查询时，`uq_users_email` 是最终防线。真实双 Session 测试证明同一规范化邮箱只能一个请求返回 201，另一个返回安全 409。
 
-### 登录与Access Token
+### 登录、Access Token 与 Refresh Token
+
+以下为 Task 5.4 已实现契约；离线与真实 HTTP/PostgreSQL 验证通过，详见[任务记录](docs/tasks/stage-5-4-refresh-http.md)。
 
 `POST /api/v1/auth/login` 的请求体严格只允许 `email` 和 `password`。邮箱复用注册时的规范化规则；密码保存在 `SecretStr` 边界内，不 trim、不截断、不 casefold，也不修改大小写。登录只限制密码为 1～128 个 Unicode 字符以约束认证工作量，不重新应用注册时的 12 字符最小长度规则。
 
@@ -554,7 +559,9 @@ $login = Invoke-RestMethod `
 ```json
 {
   "access_token": "<access-token>",
-  "token_type": "bearer"
+  "token_type": "bearer",
+  "refresh_token": "<refresh-token>",
+  "refresh_expires_at": "2026-09-25T00:00:00Z"
 }
 ```
 
@@ -575,7 +582,64 @@ Access Token 契约如下：
 - issuer 默认 `fastapi-stms`，audience 默认 `fastapi-stms-api`。
 - 必需 claims 为 `sub`、`type`、`iat`、`exp`、`iss` 和 `aud`；`sub` 是用户 UUID 文本，`type` 必须为 `access`。
 - 校验固定算法、签名、过期时间、type、issuer、audience 和 UUID subject 后，Token 才能影响数据库查询。
-- Access Token 不存入数据库。当前没有主动撤销或 denylist，只能依靠短有效期到期；Refresh Token、轮换和撤销属于延后认证增强。
+- Access Token 不存入数据库。当前没有主动撤销或 denylist，只能依靠短有效期到期；刷新、退出或密码修改后旧 Access Token 仍按原期限有效。
+
+`POST /api/v1/auth/logout` 只接受 JSON `{ "refresh_token": "<refresh-token>" }`
+（占位符需替换为客户端持有的实际凭据，不要打印）。无需有效 Access Token；成功、
+不存在或已经撤销均返回无响应体 204，无效输入 422，数据库故障 503，均禁止缓存。
+只撤销所提交凭据，不影响其他会话或已轮换的后继。客户端应串行处理刷新与退出，
+提交最新 Refresh Token 并清除本地凭据；退出不立即撤销 Access JWT。
+详见 [Task 5.5 契约与验证](docs/tasks/stage-5-5-logout.md)。
+
+`POST /api/v1/users/me/change-password` 要求有效 Bearer Access Token，JSON 仅为：
+
+```json
+{
+  "current_password": "<current-password>",
+  "new_password": "<new-password>"
+}
+```
+
+以上只是占位符。当前密码限制 1～128 字符，新密码复用注册的 12～128 字符、非全空白
+规则，不修改空格或大小写，新旧相同返回 422。用户 ID 只取认证身份；不接受目标用户。
+成功返回无响应体 204，密码不匹配/身份无效 401，输入无效 422，基础设施故障 503；
+响应禁止缓存且错误不回显密码。新密码摘要与该用户全部未撤销 Refresh Token 的吊销
+在同一事务内提交，提交前失败一起回滚；不会影响其他用户，也不会自动交付新令牌。
+客户端应清除旧凭据并用新密码重新登录。Access JWT 仍按原 TTL 有效。
+用户优先行锁使并发旧密码登录/旧凭据刷新无法漏过改密吊销；提交或响应确认丢失时
+新密码可能已生效，不能保证用旧密码重试成功。详见 [Task 5.6](docs/tasks/stage-5-6-password-change.md)。
+
+Stage 5 的安全保证、测试证据与可复现命令集中在
+[Task 5.7 验收记录](docs/tasks/stage-5-7-auth-security-acceptance.md)。注意：
+
+- 持有同一用户行锁超过等待上限，会使 login/refresh/logout/change-password 返回固定
+  503；释放锁后可以重新请求，但这不是完整的请求超时或限流策略。
+- 503 不保证“数据库没有写入”：提交成功后响应/确认丢失，login 可能留下未交付凭据，
+  refresh 的旧凭据可能已消费，改密的新密码可能已生效。logout 可按同一凭据幂等重试；
+  refresh 通常需重新登录，改密应尝试新密码登录。
+- 未交付的刷新凭据没有去重/自动清理任务，记录保留；凭据到期后不能刷新，改密也能
+  吊销该用户全部既有刷新凭据。没有即时 Access JWT 吊销或生产安全认证保证。
+
+`POST /api/v1/auth/refresh` 只接受 JSON body 中的 `refresh_token`，必须是签发的 43 字符
+URL-safe 凭据，不接受 user_id，不从 Cookie、query 或 Authorization 获取刷新凭据。
+刷新不要求有效 Access Token；新身份始终来自旧 Refresh Token 记录。使用 JSON body
+意味着调用方负责安全保管凭据；正式部署需要 HTTPS，不把令牌放进 URL/日志或浏览器
+localStorage。本阶段不设置 Cookie，不宣称提供浏览器持久登录或 CSRF Cookie 方案。
+
+```powershell
+$refreshBody = @{ refresh_token = $login.refresh_token } | ConvertTo-Json
+$login = Invoke-RestMethod -Method Post `
+    -Uri http://127.0.0.1:8000/api/v1/auth/refresh `
+    -ContentType "application/json" -Body $refreshBody
+# 不输出 $login 或 $refreshBody；成功后只使用最新凭据。
+```
+
+成功响应仍为上述四字段；刷新凭据仅存 SHA-256 摘要，期限为每次轮换起 7 天。
+旧凭据提交后不可重用；格式合法但不存在/过期/撤销/重放统一 401，schema/JSON 无效
+返回无原始输入的 422，签名/数据库故障返回固定 503。login/refresh 的 200/401/422/503
+响应包含 `Cache-Control: no-store`、`Pragma: no-cache`。字段新增会影响严格两字段客户端。
+撤销、替代摘要插入和 JWT 签发在单次提交边界内；提交前失败回滚，不返回部分凭据。
+提交确认或 HTTP 响应丢失仍可能需要重新登录，不能盲目自动重试旧凭据。
 
 ### Bearer当前用户
 
@@ -926,7 +990,7 @@ approval路径，expectation只在观察完成后参与判定。usage来自实�
 状态及测试拥有的产品行生成，不进入快速gate。报告和baseline只保留安全ID、布尔值、
 有界计数与聚合，不保存完整input、Prompt、文档、Tool参数/结果、Token或数据库URL。
 
-当前没有Refresh Token、logout、密码修改、神经reranker、grounded claim事实核验或
+当前没有独立的全设备退出接口、即时 Access JWT 吊销、神经reranker、grounded claim事实核验或
 外部Tracing供应商，也没有公共搜索HTTP接口、MCP或多Agent。Task 11.8完成后Stage 11
 结束，必须等待owner确认。
 
@@ -1048,7 +1112,7 @@ Stage 8提供可替换Provider、版本化Prompt、严格结构化结果、Servi
 
 外部Provider smoke test默认被`external_provider`标记排除。只有owner明确授权网络、凭据和可能产生的费用后，才可在仅包含合成提示的环境中显式设置`STMS_RUN_EXTERNAL_PROVIDER_SMOKE=1`并单独选择该marker；不得在普通CI中启用，也不得输出API Key或完整模型响应。
 
-Stage 5的Refresh Token、轮换、退出登录和密码修改保留为非阻塞的延后认证增强轨道。Stage 11已经提供文档上传、私有解析、确定性分块、pgvector词法/向量RRF检索、受限于不可信数据边界和严格citation验证的Agent Grounding、不记录内容的有界Tracing，以及版本化离线评估、指标和安全门。当前尚未实现grounded claim事实核验或外部Tracing供应商。
+Stage 5 已实现 Refresh Token 存储、签发、轮换、HTTP 交付、单凭据退出，以及 Task 5.6 密码修改与全部刷新吊销。Task 5.7 汇总真实安全集成与文档证据，当前验收状态见 tasks 索引。Stage 11已经提供文档上传、私有解析、确定性分块、pgvector词法/向量RRF检索、受限于不可信数据边界和严格citation验证的Agent Grounding、不记录内容的有界Tracing，以及版本化离线评估、指标和安全门。当前尚未实现grounded claim事实核验或外部Tracing供应商。
 
 Stage 12 已提供可复现的一键 Compose 应用启动、两段式 GitHub Actions、使用与架构文档、
 无 Provider 演示以及安全/成本说明。checkpoint commit `b05adae` 的真实远端 CI

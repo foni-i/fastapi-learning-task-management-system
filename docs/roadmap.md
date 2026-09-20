@@ -1902,6 +1902,27 @@ owner confirmation.
 
 ### Stage 5 — Deferred authentication hardening
 
+**Current status:** Tasks 5.1–5.7 are complete and owner-accepted. The owner has
+separately authorized [checkpoint preparation](tasks/stage-5-checkpoint-preparation.md):
+documentation status, complete pending-change review and local pre-commit checks
+only. Staging, commit/push and later features are not part of that authorization.
+The original scheduling rationale and dated per-task evidence below are historical.
+
+**Checkpoint preparation (2026-09-20; prepared, awaiting owner confirmation):**
+The original 51 pending files were reviewed, including all untracked additions;
+one preparation record brings the candidate to 52 files, with an empty index and
+HEAD still `3d58d40`. Only documentation was edited. Focused offline tests passed
+142; fresh full PostgreSQL integration passed 162 and offline pytest passed 1078
+with 163 deselected. Pre/post-suite guard and Alembic upgrade/current/heads/check
+passed with sole head `86cd95365562` and no drift; lock, Ruff, format, mypy and
+both diff checks passed. A stopped test service required interrupting one upgrade
+attempt and restarting postgres-test before the successful complete rerun. It was
+restored to stopped; development services/volumes were untouched. Bounded scans
+found no credential patterns in added/cached/untracked content; six old roadmap
+URL examples were classified separately. Exact commands, exit codes, candidate
+manifest, review limits and suggested commit text are in the preparation record.
+No staging, commit/push, remote Actions run or later feature work occurred.
+
 Preserve refresh-token persistence, rotation, revocation, logout, and password
 change as a security-hardening track. It is not deleted, but it does not block
 the first Agent MVP. The Agent critical path is Stage 4 -> 6 -> 7 -> 8 -> 9 ->
@@ -1914,6 +1935,234 @@ the first Agent MVP. The Agent critical path is Stage 4 -> 6 -> 7 -> 8 -> 9 ->
 - **Task 5.5:** Logout revocation for the presented refresh token.
 - **Task 5.6:** Password change plus all-refresh-token revocation.
 - **Task 5.7:** Real PostgreSQL security integration and documentation.
+
+**Task 5.1 implementation record (2026-09-17; owner accepted):**
+The owner confirmed the [storage contract](tasks/stage-5-1-refresh-token-model.md).
+`RefreshToken` adds six private columns, globally unique digest storage, an owner
+foreign key/index, and named digest/lifetime checks. Revision `86cd95365562`
+extends `e3b7c2d9a410` without changing historical revisions; it is the sole head
+of the 11-revision chain. No issuance, rotation, repository, service, endpoint,
+login response, configuration, dependency, or CI behavior was added.
+
+Focused offline checks passed 41 tests; the new guarded PostgreSQL tests passed
+21 cases, including parent/new/parent/new migration round trips, retained
+user/project sentinel rows and extensions, database defaults, global uniqueness,
+null/format/time boundaries, foreign keys, and recovery after rejected writes.
+The complete integration command passed 93 tests without an external Provider;
+the offline suite passed 944 tests with 94 deselected. Migration target guard,
+upgrade/current/heads/check passed before and after the integration suite with
+no drift. Lock, Ruff lint/format, mypy (227 source files), and both Git diff
+checks passed. Initial test-only type-narrowing and formatting failures were
+corrected; details and real exit codes are in the task record.
+
+Docker Desktop was started because its engine was initially unavailable. Only
+`postgres-test` was explicitly started and stopped, restoring its original
+stopped state; `app` and `postgres-dev` stayed stopped and the development volume
+was untouched. Changes remain unstaged, with the earlier planning documents
+preserved and updated. No commit, push, or remote Actions run occurred for this
+task. Schema downgrade intentionally discards refresh-token rows; hash-only
+issuance and the rest of authentication hardening were not implemented in this
+task. The owner subsequently accepted Task 5.1 and authorized Task 5.2 separately.
+
+**Task 5.2 implementation record (2026-09-17; owner continued after acceptance on 2026-09-18):**
+The [issuance task](tasks/stage-5-2-refresh-token-issuance.md) adds an internal
+use case for a caller-authenticated user UUID: explicit 32-byte secure randomness,
+43-character opaque credentials, exact-byte SHA-256 digests, and a fixed seven-day
+UTC lifetime. The repository receives only owner/digest/timestamps and flushes;
+the service commits before returning a secret-aware internal delivery value.
+Generation, persistence, commit, and rollback failures are safely bounded without
+automatic retry or secret logging. A lost commit acknowledgement can leave an
+undelivered digest, as documented; this does not promise distributed atomicity.
+
+Focused offline tests passed 19 cases; four real PostgreSQL tests proved separate
+session visibility after commit, hash-only SQL parameters, cross-owner collision
+rejection, missing-owner rejection, and rollback after flush/pre-commit failure.
+The complete integration suite passed 97 cases; ordinary tests passed 963 with
+98 deselected. Target guard and upgrade/current/heads/check passed before and
+after integration; the sole head remains `86cd95365562` with no schema drift.
+Lock, Ruff lint/format, mypy (234 source files), and both Git diff checks passed.
+Initial lint/type issues were corrected before the final quality gate.
+
+Only `postgres-test` was started and stopped, restoring its prior stopped state.
+Development containers/volume, dependencies, schema, CI, login response, and HTTP
+routes were unchanged. Task 5.1 changes were preserved; all work remains unstaged,
+with no commit, push, external Provider call, or new remote Actions run. Rotation
+and HTTP delivery were not part of this task; the owner subsequently continued
+after Task 5.2 acceptance.
+
+**Task 5.3 implementation record (2026-09-18; owner accepted and continued):**
+The [rotation task](tasks/stage-5-3-refresh-token-rotation.md) adds an internal
+atomic use case: bounded row-lock wait, identity-map refresh, time sampled after
+locking, owner-scoped conditional revocation, replacement insertion, and delivery
+only after commit. Invalid/expired/revoked/replayed credentials share one safe
+error. There are no HTTP, schema, dependency, or configuration changes.
+
+Focused offline tests passed 38 cases (19 new); mypy passed 236 source files after
+fixing a test-only untyped dialect constructor. Eleven new PostgreSQL cases passed,
+proving actual lock contention with only one winner, replay rejection, replacement
+reuse, owner isolation, stale identity-map refresh, and rollback after revocation
+when generation, unique insertion, or pre-commit failure occurs. The complete
+integration suite passed 108 cases. Target guard and upgrade/current/heads/check
+passed before and after integration: sole head `86cd95365562`, no schema drift.
+
+Docker initially failed initializing sailor-ingest.sock. After the owner allowed
+recovery, the engine was already responsive; no socket deletion/reset was needed.
+Starting postgres-test on 5433 failed (exit 1) because Windows reserved 5355–5454.
+A process-local test-port override of 55433 allowed the isolated tmpfs test
+container to be recreated and started. Only postgres-test was operated, then
+stopped; app/postgres-dev remained stopped, and development volumes were untouched.
+No environment/configuration file or OS port reservation was changed. The socket
+failure is not claimed permanently fixed; subsequent tests may still need the
+explicit port override. Task 5.4 has not started; no commit/push or remote Actions
+run occurred. Prior changes remain unstaged and preserved.
+The complete offline suite passed 982 tests with 109 deselected. Lock (98
+packages), Ruff lint/format (263 files on the final rerun), mypy (236 source files), both Git diff
+checks, and a bounded added/untracked-content secret scan passed. A lost commit
+acknowledgement can still consume the old credential without delivering the new
+one; this known boundary is documented, not hidden by the pre-commit fault tests.
+
+**Task 5.4 implementation record (2026-09-18; owner accepted, continued to 5.5):**
+After the owner continued from Task 5.3 acceptance, the
+[HTTP delivery contract](tasks/stage-5-4-refresh-http.md) specifies JSON-body-only
+refresh credentials, an explicitly expanded login response, and one transaction
+covering refresh consumption/replacement plus access-JWT creation before commit.
+It also specifies authentication-input redaction, no-store responses, HTTP
+integration tests, and the existing commit-acknowledgement limitation. JSON versus
+Cookie delivery was resolved in favor of body-only delivery by the owner. Code now
+implements login token pairs and refresh HTTP, shared non-committing preparation
+steps, sanitized authentication validation, cache headers, and safe 503 boundaries.
+The standalone Task 5.2/5.3 use cases retain their transaction contracts. Public
+responses now explicitly deliver credentials while ordinary errors/resources do not.
+
+Focused tests passed 97 cases; the complete offline suite passed 1017 with 120
+deselected. Lock (98 packages), Ruff lint/format (266 files), mypy (238 files), and
+both diff checks passed. Eleven new PostgreSQL HTTP tests now pass, alongside
+authentication/issuance/rotation regressions (31 focused integration cases total).
+The complete integration suite passed 119 cases without an external Provider.
+Target guard and upgrade/current/heads/check passed before and after integration,
+with the sole head still `86cd95365562` and no drift. No migration or dependency
+was added, and the original standalone refresh use cases continue to pass.
+
+Docker's engine pipe was initially absent and startup failed on sailor-ingest.sock.
+Authorized exact-socket rename and non-recursive removal both failed with Windows
+access errors; no file was removed/renamed and no volume/WSL/config reset occurred.
+Only verified Docker processes were restarted during those failed attempts. The
+owner subsequently restarted Docker and the engine became available. Only the
+originally stopped postgres-test service was started (process-local port 55433)
+and stopped after verification; app/postgres-dev remained stopped and development
+volumes were untouched. No socket cleanup was needed in the successful resumption.
+All offline quality gates were rerun successfully; code/test fingerprints remained
+unchanged while pending-status documentation was updated. Existing changes remain
+unstaged, with no commit, push, remote Actions run, or Task 5.5 work. The known
+commit/HTTP-delivery ambiguity and possible recurrence of the local Docker/port
+issues remain documented. Stop here for owner acceptance.
+
+**Task 5.5 implementation record (2026-09-18; owner accepted, continued to 5.6):**
+After the owner requested the next task, [presented-token logout](tasks/stage-5-5-logout.md)
+adds JSON-body `POST /api/v1/auth/logout`. A locked digest lookup identifies the
+credential owner; one owner-scoped update and service-owned commit precede empty
+204. Missing/already revoked credentials share idempotent 204, expired credentials
+can also be revoked, malformed input is sanitized 422, and infrastructure failures
+are safe 503. Authentication cache/error boundaries include logout. No JWT signing
+or valid access JWT is required; access JWTs retain their original lifetime.
+
+Only the presented row is revoked: other sessions and already-issued successors
+remain active. Real PostgreSQL tests observe `pg_blocking_pids` in both logout/refresh
+orders and logout/logout contention. Logout first prevents refresh; refresh first
+leaves its successor valid. Clients should serialize the actions and submit their
+latest refresh credential. No family revocation or password change was added.
+
+Focused offline tests passed 88 cases (28 new), HTTP PostgreSQL tests passed 21
+(10 new logout cases), the complete integration suite passed 129, and the complete
+offline suite passed 1045 with 130 deselected. Lock (98 packages), Ruff lint/format
+(268 files), mypy (239 source files), both Git diff checks and bounded secret-pattern
+scans passed. Initial import ordering and test-only typing failures were corrected.
+Pre/post-suite migration guard and upgrade/current/heads/check passed with sole head
+`86cd95365562`, no drift. postgres-test was restored to stopped after verification;
+all real command outcomes are recorded in the task document. Only postgres-test was operated using process-local port 55433;
+development containers/data, existing edits and the empty index were preserved.
+No schema/configuration/dependency changes, commit/push or remote CI run occurred.
+Task 5.6 has not started. Stop for owner acceptance.
+
+**Task 5.6 implementation record (2026-09-18–19; owner accepted, continued to 5.7):**
+The owner continued after Task 5.5. [Password change](tasks/stage-5-6-password-change.md)
+requires a valid access JWT plus the current password; strict secret-aware JSON
+accepts only current_password/new_password. One transaction updates Argon2id hash
+and updated_at and revokes all unrevoked refresh rows for the authenticated owner.
+Empty 204 follows commit; safe 401/422/503 and no-store responses cover failures.
+No replacement token is issued, no other owner is affected, and access JWTs retain
+their original lifetime. No migration, dependency or configuration was added.
+
+User-first locking now serializes login verification, refresh/logout and internal
+refresh insertion with password changes. Locked queries refresh stale identity-map
+state. This prevents old-password login or refresh in flight from escaping bulk
+revocation; real PostgreSQL tests observe blocking in both orders and competing
+password changes. Hash/flush/revocation/pre-commit faults roll back both mutations.
+
+Focused offline tests passed 129 cases; the initial focused PostgreSQL command
+passed 54 (39 HTTP, 11 rotation, 4 issuance). Two additional integration boundaries
+and a stronger foreign-password case were added afterwards. The full integration
+run lost its tool session across interruption: its exit status cannot be recovered
+and is not counted as a pass. On September 19, Docker's engine pipe was absent;
+compose ps/up exited 1. Normal Desktop startup exited 0 but did not restore the
+engine. Recent bounded log checks again found inaccessible sailor-ingest.sock.
+No socket cleanup, factory reset, volume deletion or development-container action
+was performed. At that point final container state could not be verified.
+
+Final offline pytest passed 1078 with 150 deselected. Lock (98 packages), Ruff
+lint/format (271 files), mypy (241 source files), both Git diff checks and bounded
+secret-pattern scans passed. Initial guarded upgrade/current/heads/check passed
+with sole head 86cd95365562 and no drift; final full integration, post-suite
+migration checks and test-service restoration were pending Docker recovery.
+Existing work and the empty index are preserved. No commit/push or remote Actions
+run occurred. Task 5.7 has not started.
+
+After the owner restarted Docker on September 19, verification resumed without
+changing application code/tests/migrations (SHA-256 fingerprints match). Focused
+offline tests passed 129; focused PostgreSQL tests passed 56 (41 HTTP including
+20 password-change cases, 11 rotation, 4 issuance). The full integration command
+passed 149 without an external Provider. All late-added boundaries now have real
+database evidence. Pre/post-suite target guard and upgrade/current/heads/check
+passed with sole head 86cd95365562 and no drift. Offline pytest again passed 1078
+with 150 deselected; lock, Ruff lint/format, mypy, both diff checks and bounded
+secret scans passed. Exact commands and exit codes are recorded in the task file.
+Only postgres-test was started on process-local port 55433 and restored to stopped;
+app/postgres-dev remained exited, development volumes were untouched, and the
+index remains empty. No socket cleanup or remote Actions run was performed.
+The task is ready for owner acceptance, not automatically advancing to Task 5.7.
+Access JWT lifetime, lock contention, rate-limiting gaps and commit-acknowledgement
+ambiguity remain documented; Docker's recurring socket issue is not claimed fixed.
+
+**Task 5.7 acceptance record (2026-09-19; subsequently owner-accepted):**
+The owner accepted Task 5.6 and authorized the Stage 5 closeout. The
+[security acceptance contract and evidence matrix](tasks/stage-5-7-auth-security-acceptance.md)
+maps storage/migration, issuance, rotation, HTTP redaction, logout, password change,
+owner isolation and concurrency guarantees to existing tests. Thirteen new real
+PostgreSQL cases add a complete two-owner lifecycle, four actual five-second user
+lock timeouts with successful recovery, four post-commit exception scenarios, and
+four secret-safe malformed-request paths. Post-commit injection is a controlled
+simulation, not an actual network outage; safe 503 does not prove rollback.
+
+Focused offline tests passed 142. New acceptance tests passed 13; full integration
+passed 162 without external Providers; offline pytest passed 1078 with 163
+deselected. Lock (98 packages), Ruff lint/format (273 files), mypy (242 source files),
+both Git diff checks and bounded secret-pattern scans passed. Initial test-only
+Response typing was corrected from httpx to the installed client's httpx2 type.
+Pre/post-suite guard and upgrade/current/heads/check passed with sole head
+86cd95365562 and no drift. Only postgres-test ran on process-local port 55433 and
+was restored to exited; app/postgres-dev and development volumes were untouched.
+
+Application/migration SHA-256 fingerprints match the starting baseline. Only the
+new integration file and documentation changed; no functionality, dependency,
+configuration, workflow, staging, commit/push or remote Actions run was introduced.
+All 49 existing change entries are preserved; two new files bring the total to 51,
+with an empty index. README, architecture, security limits and task records now
+distinguish pre-commit rollback from post-commit ambiguity and local evidence from
+historical CI. Stateless Access JWT lifetime, rate-limiting gaps, undelivered-token
+retention, no family recovery, lock contention and local Docker instability remain
+explicit limitations. Stage 5 closeout stopped for owner acceptance; the owner
+subsequently accepted it and explicitly authorized checkpoint preparation as a
+separate task. These results do not authorize actual commits or later features.
 
 Each task remains approximately 1–2 focused hours and retains short-lived
 stateless access-token semantics. Do not add a denylist, device management,

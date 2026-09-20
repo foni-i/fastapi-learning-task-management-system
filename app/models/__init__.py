@@ -15,6 +15,7 @@ from app.models.agent_tool_execution import (
 from app.models.knowledge_document import KnowledgeDocument, KnowledgeDocumentStatus
 from app.models.knowledge_document_chunk import KnowledgeDocumentChunk
 from app.models.project import Project, ProjectStatus
+from app.models.refresh_token import RefreshToken
 from app.models.task import Task, TaskPriority, TaskStatus
 from app.models.user import User
 
@@ -32,6 +33,7 @@ __all__ = [
     "KnowledgeDocumentStatus",
     "Project",
     "ProjectStatus",
+    "RefreshToken",
     "Task",
     "TaskPriority",
     "TaskStatus",

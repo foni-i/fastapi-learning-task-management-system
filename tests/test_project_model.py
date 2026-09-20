@@ -43,6 +43,7 @@ def test_project_registers_in_shared_metadata_with_exact_columns() -> None:
         "agent_tool_executions",
         "knowledge_documents",
         "knowledge_document_chunks",
+        "refresh_tokens",
     }
     assert set(Project.__table__.columns.keys()) == EXPECTED_COLUMNS
 

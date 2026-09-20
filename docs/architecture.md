@@ -111,7 +111,48 @@ Agent, and knowledge-document ownership.
 The project does not currently implement general request-ID middleware,
 structured request logging, CORS policy, or the previously planned common error
 envelope. Implemented endpoints use their explicit response schemas and bounded
-`detail` messages; validation errors mask password input in `app/main.py`.
+`detail` messages; login/refresh/logout/password-change validation errors use a bounded server-selected
+field/message allowlist in `app/main.py`, while other routes retain password masking.
+
+Task 5.4 adds JSON-body credential delivery, verified by real HTTP/PostgreSQL tests
+and accepted by the owner. Login authenticates email/password and prepares a refresh digest;
+refresh authenticates possession by locked digest lookup, then derives the owner
+from that row, never from a client-selected UUID or an Access Token. Both use cases
+prepare the access JWT and response before the single commit. The shared private
+refresh preparation steps do not commit; the Task 5.2/5.3 standalone wrappers keep
+their existing transaction contracts. The authentication route boundary suppresses
+unsafe dependency/service diagnostics and sets no-store headers; it is not a global
+error/logging framework. Responses explicitly deliver two credentials and the
+refresh expiry, while repr hides credentials. Cookie delivery is not implemented.
+
+Task 5.5 adds JSON-body logout with the same credential/error boundary. Its service
+locks the presented digest, conditionally revokes that row using its stored owner,
+and commits before an empty 204. Missing/already revoked credentials share 204;
+expired credentials may be revoked too. No successor, other session or access JWT
+is revoked. Logout and rotation serialize on the same row; refresh winning first
+leaves a valid successor. Clients must serialize these actions and use the latest
+refresh credential. Verification evidence lives in the Task 5.5 record.
+
+Task 5.6 adds authenticated password change with current-password reauthentication.
+One service transaction writes the Argon2id hash/updated_at and revokes every
+unrevoked refresh credential for that owner before empty 204. Login now locks the
+user before password verification; refresh/logout lock the user before their
+credential row, and internal creation also locks its user. Consistent user-first
+locking prevents in-flight old-password login or refresh from escaping revocation.
+The password-change query refreshes stale identity-map state after acquiring its
+lock. All changes roll back on pre-commit failure; existing access JWTs remain
+valid until expiry. Hash work holds the user lock, so competing same-user requests
+can reach the bounded lock timeout. No migration or new dependency is required.
+
+Stage 5 acceptance evidence is consolidated in
+[Task 5.7](tasks/stage-5-7-auth-security-acceptance.md). The additional PostgreSQL
+suite covers the combined two-owner lifecycle, real lock-timeout recovery at all
+four authentication write endpoints, and exceptions injected after real commits.
+A safe 503 does not imply rollback: login can retain an undelivered credential,
+refresh may already have consumed the old credential, and a new password may
+already be effective. Logout can retry the same credential; refresh/password-change
+recovery may require login with the applicable password. This is a documented
+delivery boundary, not a distributed-transaction or exactly-once guarantee.
 
 ## Agent Tool and domain-service boundary
 
@@ -428,8 +469,8 @@ not start Docker merely to re-prove previously accepted database behavior.
 
 ## Current limits
 
-The repository does not currently implement Refresh Token rotation, logout,
-password change, password recovery, administrators, grounded-claim factual
+The repository does not currently implement all-session logout,
+immediate Access JWT revocation, password recovery, administrators, grounded-claim factual
 verification, a tracing vendor/exporter, a public search HTTP API, MCP,
 multi-Agent orchestration, Version 2 tags/study sessions/statistics, Kubernetes,
 or a production cloud topology. These capabilities must not be inferred from the

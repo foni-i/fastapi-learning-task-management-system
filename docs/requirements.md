@@ -20,8 +20,9 @@ material, and report repeatable evaluation evidence.
 - The **first Agent MVP** adds structured planning, service-backed tools, a
   single-agent LangGraph workflow, approval/resume, streaming, focused RAG, and
   evaluation. It does not require refresh-token/logout/password-change work.
-- Refresh-token rotation, logout, and password change remain planned security
-  hardening. They are deferred rather than deleted.
+- Refresh-token rotation, logout, and password change form the resumed Stage 5
+  security-hardening track. Implemented behavior and acceptance status are recorded
+  per task; completing one task does not authorize the next.
 - MCP exposure and multi-agent orchestration are post-MVP enhancements.
 
 ## Users and core workflow
@@ -29,7 +30,7 @@ material, and report repeatable evaluation evidence.
 The MVP has one role: an authenticated user. A user can:
 
 1. Register, sign in with a short-lived access token, and view/update their
-   profile. Refresh, sign-out, and password-change hardening is a deferred track.
+   profile. The resumed hardening track adds refresh, sign-out, and password change.
 2. Create and organize learning projects.
 3. Create, filter, complete, update, and delete tasks belonging to those
    projects.
@@ -49,8 +50,9 @@ There is no administrator workflow in the MVP.
   current refresh tokens after password change.
 - Authentication failures use a generic message that does not reveal whether an
   account exists.
-- API responses and logs never disclose passwords, password hashes, complete
-  tokens, or secrets.
+- Logs, errors and ordinary resource responses never disclose passwords,
+  password hashes, complete tokens or secrets. Successful login/refresh responses
+  are the explicit credential-delivery exception and must be non-cacheable.
 
 ### Projects
 

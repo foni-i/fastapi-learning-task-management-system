@@ -2,8 +2,12 @@
 
 ## Status and interpretation
 
-This document describes the repository at Alembic head `e3b7c2d9a410`, including
-checkpoint commit `b05adae` and the documentation audit on 2026-09-16. It is an
+This document includes the Stage 5 working-tree authentication changes at Alembic
+head `86cd95365562`, the 2026-09-19 acceptance work and subsequent owner acceptance.
+The [checkpoint preparation record](tasks/stage-5-checkpoint-preparation.md) separates
+current pre-commit checks from earlier task results. Checkpoint commit `b05adae`,
+head `e3b7c2d9a410`, and its remote CI evidence below remain historical snapshots;
+they do not establish remote CI success for the current uncommitted changes. It is an
 engineering disclosure for a learning project, not a security
 certification, privacy policy, compliance statement, production-readiness claim,
 or warranty.
@@ -29,10 +33,10 @@ results are in [`demo/README.md`](demo/README.md) and
 | **Container migration:** Alembic upgrade fails before Uvicorn | App container exits instead of serving against an unknown schema | Fail-fast command in [`Dockerfile`](../Dockerfile), Compose health dependency in [`compose.yaml`](../compose.yaml), and asset tests in [`tests/test_docker_assets.py`](../tests/test_docker_assets.py) | No multi-replica migration coordination, rollback automation, or production release strategy | **P0 proposal before cloud deployment:** separate migration job, release lock, rollback/restore procedure |
 | **Database outage or pool exhaustion** | Readiness becomes 503; affected API/Agent operations fail | Short synchronous Session lifecycle in [`app/db/session.py`](../app/db/session.py), bounded readiness probe, and real database tests under [`tests/integration/`](../tests/integration/) | No high-availability database, circuit breaker, capacity test, backup, or recovery-time evidence | **P0 proposal before production:** backup/restore drill, connection/pool sizing, availability design |
 | **JWT secret missing, weak, or changed** | Token issuance/validation fails safely; existing tokens become invalid after a secret change | Minimum 32-character configured secret and fixed HS256/issuer/audience/type/expiry validation in [`app/core/config.py`](../app/core/config.py) and [`app/core/tokens.py`](../app/core/tokens.py); [`tests/test_access_tokens.py`](../tests/test_access_tokens.py) | No secret manager, rotation procedure, key identifier, asymmetric signing, or overlap window | **P0 proposal before production:** managed secret storage and documented rotation policy |
-| **Credential guessing or stolen access token** | Wrong and unknown credentials share a generic 401; a valid stolen token works until expiry | Argon2id password storage in [`app/core/security.py`](../app/core/security.py), generic auth errors, short token TTL, and [`tests/integration/test_authentication.py`](../tests/integration/test_authentication.py) | No rate limiting, MFA, refresh-token revocation, logout, password-change revocation, or anomaly detection | **P0 roadmap:** complete deferred Stage 5; **P0 proposal:** rate limiting and abuse monitoring |
+| **Credential guessing or stolen access token** | Wrong and unknown credentials share a generic 401; a valid stolen token works until expiry, including after logout/password change | Argon2id password storage in [`app/core/security.py`](../app/core/security.py), generic auth errors, current-password reauthentication, atomic all-refresh revocation, and user-first credential locking | No rate limiting, MFA, immediate JWT revocation or anomaly detection; logout alone revokes only the presented credential, while password change revokes all existing refresh credentials; Task 5.7 records accepted evidence | **P0 proposal:** rate limiting and abuse monitoring; Stage 5 acceptance is complete |
 | **Cross-user resource request** | Missing and foreign-owned resources normally share the same safe 404 | Trusted identity dependency, owner predicates in [`app/repositories/`](../app/repositories/), composite ownership constraints, and Project/Task/Agent/RAG integration tests | A compromised owner token still grants that owner's access; there is no role model or tenant administration | Keep single-owner scope; add roles only after a concrete product requirement |
-| **Application write fails after mutation begins** | Known domain failures are bounded; the transaction is rolled back | Services own commit/rollback, Repositories only flush; examples in [`app/services/tasks.py`](../app/services/tasks.py), [`app/services/knowledge_document_indexing.py`](../app/services/knowledge_document_indexing.py), and transaction tests | External Provider work and its cost cannot be rolled back; process loss around distributed boundaries can leave an operation needing reconciliation | **P1 proposal:** explicit operation state/reconciliation for external side effects |
-| **Unexpected exception while debug mode is enabled** | Development responses may expose more diagnostics than production-safe errors | Password-bearing validation input is masked in [`app/main.py`](../app/main.py); known domain/provider errors use bounded messages | No global production error envelope, request-ID middleware, structured redaction policy, or proof for every unexpected exception; `STMS_DEBUG=true` is unsafe for public deployment | **P0 proposal before public exposure:** force debug off, global safe handler, request IDs, redacted structured logging |
+| **Application write fails after mutation begins** | Known domain failures are bounded; pre-commit failure rolls back the transaction, but an already committed write cannot be undone by a later error | Services own commit/rollback, Repositories only flush; examples in [`app/services/tasks.py`](../app/services/tasks.py), [`app/services/knowledge_document_indexing.py`](../app/services/knowledge_document_indexing.py), and transaction tests | External Provider work and its cost cannot be rolled back; commit acknowledgement or response loss can leave a completed write whose outcome is uncertain to the client | **P1 proposal:** explicit operation state/reconciliation for external side effects |
+| **Unexpected exception while debug mode is enabled** | Development responses may expose more diagnostics than production-safe errors | Login/refresh/logout/password-change use bounded validation allowlists and a safe route error boundary; other password-bearing validation input is masked in [`app/main.py`](../app/main.py); known domain/provider errors use bounded messages | No global production error envelope, request-ID middleware, structured redaction policy, or proof for every unexpected exception; `STMS_DEBUG=true` is unsafe for public deployment | **P0 proposal before public exposure:** force debug off, global safe handler, request IDs, redacted structured logging |
 | **Model or Embedding Provider is absent, slow, rate-limited, or malformed** | Agent/index/search returns a bounded unavailable/configuration failure | Replaceable Protocols, timeouts, bounded retries for planning, fixed embedding validation, and fakes in [`app/agent/providers.py`](../app/agent/providers.py), [`app/agent/embeddings.py`](../app/agent/embeddings.py), and their tests | No circuit breaker, provider failover, quota monitor, real-service SLO, or cost ceiling; hybrid retrieval currently requires query embedding, so Provider failure also loses lexical results | **P1 proposal:** explicit budgets and circuit breaker; decide and test whether lexical-only degradation is acceptable |
 | **Combined legal goal, Project, Task, feedback, and grounding data exceeds the planning input schema** | The Provider receives a deterministic bounded projection rather than an input-validation failure | Central 20,000-character budget, 900-character final reserve, stable priority projection, Unicode-safe truncation, and explicit omission manifest in [`app/agent/prompt_budget.py`](../app/agent/prompt_budget.py); maximum-schema tests in [`tests/test_agent_prompts.py`](../tests/test_agent_prompts.py) | Character limits are not token or monetary budgets; truncation can remove context and reduce model quality even when identity and ordering are preserved | Measure real token use and plan quality against representative workloads; adjust only through a versioned, tested budget decision |
 | **Model requests an unknown or forbidden Tool/argument** | Request fails with a fixed “not allowed” or “invalid” classification before a gateway opens | Exact allowlist and `extra="forbid"` schemas in [`app/agent/tools.py`](../app/agent/tools.py); policy tests in [`tests/test_agent_high_impact_policy.py`](../tests/test_agent_high_impact_policy.py) | An allowed action can still be semantically poor; schemas do not establish user intent | Continue deterministic validation and require meaningful human review for writes |
@@ -88,6 +92,16 @@ evidence:
 7. The protected integration harness rejects unsafe migration targets. Task 12.5
    demonstrated a real local Compose startup and owner-scoped domain flow while
    preserving the development volume.
+8. Refresh storage is hash-only, rotation rejects replay, logout revokes only the
+   presented credential, and password change atomically revokes all existing
+   refresh credentials for the authenticated owner. User-first locks serialize
+   login/refresh/password changes. The [Stage 5 evidence matrix](tasks/stage-5-7-auth-security-acceptance.md)
+   maps each claim to tests and keeps stateless Access JWT lifetime explicit.
+9. Real five-second user-lock timeouts produce safe 503 responses at the four
+   authentication write endpoints, with no mutation and successful retry after
+   lock release. Post-commit exception injection separately proves that safe 503
+   does not promise rollback of an already committed write. This simulates an
+   acknowledgement failure; it is not a real network-fault or availability test.
 
 Evidence is distributed across the linked code/tests above and the dated
 [`demo/results.md`](demo/results.md) snapshot. “Proved” means those exact tested
@@ -98,6 +112,11 @@ properties, not absence of all vulnerabilities.
 - Known authentication, domain, Provider, Agent, document, and retrieval failures
   are translated to fixed or bounded errors. Unexpected exceptions are not yet
   covered by one production-grade global sanitization and logging policy.
+- Authentication commit/response loss can leave an undelivered refresh credential,
+  consume the old refresh credential or apply a new password. Retrying logout is
+  idempotent; login creates another independent credential, while refresh/password
+  change may require reauthentication. There is no credential-delivery deduplication,
+  family recovery or automatic row cleanup. Expiry rejects use, not stored-row retention.
 - Input bounds, parser limits, and untrusted grounding reduce exposure; they are
   not malware detection, parser isolation, or factual verification.
 - The deterministic planning-input budget prevents schema overflow, but does not
@@ -119,7 +138,7 @@ The project does not guarantee:
   disaster recovery objectives;
 - protection against denial of service, brute force, host compromise, database
   compromise, supply-chain compromise, or unknown parser/model vulnerabilities;
-- logout revocation, Refresh Token rotation, password-change revocation, MFA,
+- a standalone all-session logout endpoint or immediate Access JWT revocation, MFA,
   account recovery, roles, or administrative controls;
 - correctness, truthfulness, completeness, neutrality, or safety of uploaded
   documents, model output, retrieved excerpts, plans, or citations;
@@ -137,7 +156,7 @@ the roadmap.
 
 | Priority | Improvement | Dependency and classification |
 | --- | --- | --- |
-| P0 | Complete Refresh Token rotation, logout, password change, and revocation | Existing deferred Stage 5 roadmap |
+| Completed | Stage 5 authentication hardening and security-limit acceptance | Tasks 5.1–5.7 are owner-accepted; checkpoint preparation is separate and does not imply commit/push, remote CI success, immediate Access JWT revocation or production rate limiting |
 | P0 | Add production edge and operations controls: TLS termination, debug-off enforcement, managed secrets, safe global errors/logging, rate limiting, backup/restore drill | **Proposal** required before public deployment; each high-risk control should be a separate task |
 | P0 | Isolate and scan untrusted file parsing | **Proposal** required before accepting public untrusted uploads |
 | P1 | Add privacy-reviewed trace export, alerting, retention, and access controls | **Proposal**; depends on a data-classification and observability decision |

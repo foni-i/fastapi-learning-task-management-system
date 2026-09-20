@@ -32,7 +32,7 @@ from app.core.tokens import (
 )
 from app.db.session import get_session
 from app.main import app
-from app.models import User
+from app.models import RefreshToken, User
 from app.repositories.users import UserRepository
 from app.schemas.user import CurrentUserEmailUpdate, PublicUser
 from app.services.current_user import (
@@ -126,6 +126,10 @@ class AuthenticationHarness:
         if not predicates:
             return
         with self.session_factory.begin() as session:
+            owners = select(User.id).where(or_(*predicates))
+            session.execute(
+                delete(RefreshToken).where(RefreshToken.user_id.in_(owners))
+            )
             session.execute(delete(User).where(or_(*predicates)))
 
     def session_marker(self) -> int:
@@ -195,7 +199,12 @@ def login(client: TestClient, email: str, password: str = TEST_PASSWORD) -> str:
         json={"email": email, "password": password},
     )
     assert response.status_code == 200
-    assert set(response.json()) == {"access_token", "token_type"}
+    assert set(response.json()) == {
+        "access_token",
+        "token_type",
+        "refresh_token",
+        "refresh_expires_at",
+    }
     assert response.json()["token_type"] == "bearer"
     return cast(str, response.json()["access_token"])
 

@@ -1,8 +1,9 @@
 """User persistence operations with caller-owned transaction control."""
 
+from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.models.user import User
@@ -25,6 +26,33 @@ class UserRepository:
 
         statement = select(User).where(User.id == user_id)
         return self._session.scalar(statement)
+
+    def get_by_email_for_update(self, email: str) -> User | None:
+        """Serialize login with password changes before checking the password."""
+        self._session.execute(text("SET LOCAL lock_timeout = '5s'"))
+        return self._session.scalar(
+            select(User)
+            .where(User.email == email)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+
+    def get_by_id_for_update(self, user_id: UUID) -> User | None:
+        """Lock the trusted owner before any refresh-row locks or inserts."""
+        self._session.execute(text("SET LOCAL lock_timeout = '5s'"))
+        return self._session.scalar(
+            select(User)
+            .where(User.id == user_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+
+    def update_password(
+        self, user: User, *, password_hash: str, updated_at: datetime
+    ) -> None:
+        user.password_hash = password_hash
+        user.updated_at = updated_at
+        self._session.flush()
 
     def create(self, *, email: str, password_hash: str) -> User:
         """Add and flush a user without committing the caller's transaction."""

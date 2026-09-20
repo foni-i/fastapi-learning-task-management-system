@@ -1,6 +1,7 @@
 """Connection-free API tests for the versioned login endpoint."""
 
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -11,7 +12,7 @@ from app.api.v1.endpoints import auth
 from app.core.exceptions import INVALID_CREDENTIALS_MESSAGE, InvalidCredentialsError
 from app.db.session import get_session
 from app.main import app
-from app.schemas.auth import AccessTokenResponse, UserLoginRequest
+from app.schemas.auth import TokenPairResponse, UserLoginRequest
 
 CONTROLLED_PASSWORD = "controlled login password"
 
@@ -50,10 +51,14 @@ def test_login_returns_200_and_exact_token_fields(
     def fake_authenticate(
         credentials: UserLoginRequest,
         received_session: Session,
-    ) -> AccessTokenResponse:
+    ) -> TokenPairResponse:
         observed["credentials"] = credentials
         observed["session"] = received_session
-        return AccessTokenResponse(access_token="controlled.compact.token")
+        return TokenPairResponse(
+            access_token="controlled.compact.token",
+            refresh_token="a" * 43,
+            refresh_expires_at=datetime(2026, 9, 25, tzinfo=UTC),
+        )
 
     monkeypatch.setattr(auth, "authenticate_user", fake_authenticate)
     response = client.post(
@@ -65,7 +70,10 @@ def test_login_returns_200_and_exact_token_fields(
     assert response.json() == {
         "access_token": "controlled.compact.token",
         "token_type": "bearer",
+        "refresh_token": "a" * 43,
+        "refresh_expires_at": "2026-09-25T00:00:00Z",
     }
+    assert response.headers["cache-control"] == "no-store"
     credentials = observed["credentials"]
     assert isinstance(credentials, UserLoginRequest)
     assert credentials.email == "user@example.com"
@@ -88,7 +96,7 @@ def test_invalid_credentials_return_the_same_safe_401(
     def reject_credentials(
         _credentials: UserLoginRequest,
         _session: Session,
-    ) -> AccessTokenResponse:
+    ) -> TokenPairResponse:
         raise InvalidCredentialsError(INVALID_CREDENTIALS_MESSAGE)
 
     monkeypatch.setattr(auth, "authenticate_user", reject_credentials)
@@ -124,7 +132,7 @@ def test_login_validation_masks_password_and_skips_service(
 
     assert response.status_code == 422
     assert rejected_password not in response.text
-    assert response.json()["detail"][0]["input"] == "**********"
+    assert "input" not in response.json()["detail"][0]
     service.assert_not_called()
     assert lifecycle == ["opened", "closed"]
 
@@ -141,15 +149,17 @@ def test_login_service_error_still_closes_session(
     def fail_authentication(
         _credentials: UserLoginRequest,
         _session: Session,
-    ) -> AccessTokenResponse:
+    ) -> TokenPairResponse:
         raise RuntimeError("safe controlled failure")
 
     monkeypatch.setattr(auth, "authenticate_user", fail_authentication)
-    with pytest.raises(RuntimeError, match="safe controlled failure"):
-        client.post(
-            "/api/v1/auth/login",
-            json={"email": "user@example.com", "password": CONTROLLED_PASSWORD},
-        )
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"email": "user@example.com", "password": CONTROLLED_PASSWORD},
+    )
+    assert response.status_code == 503
+    assert "safe controlled failure" not in response.text
+    assert response.headers["cache-control"] == "no-store"
 
     assert lifecycle == ["opened", "closed"]
 
@@ -174,11 +184,13 @@ def test_login_openapi_has_bounded_request_response_and_error_contracts() -> Non
 
     assert set(schema["paths"]["/api/v1/auth/login"]) == {"post"}
     assert operation["requestBody"]["required"] is True
-    assert set(operation["responses"]) == {"200", "401", "422"}
+    assert set(operation["responses"]) == {"200", "401", "422", "503"}
     assert set(schemas["UserLoginRequest"]["properties"]) == {"email", "password"}
-    assert set(schemas["AccessTokenResponse"]["properties"]) == {
+    assert set(schemas["TokenPairResponse"]["properties"]) == {
         "access_token",
         "token_type",
+        "refresh_token",
+        "refresh_expires_at",
     }
     assert "password_hash" not in str(operation)
-    assert "/api/v1/auth/refresh" not in schema["paths"]
+    assert "/api/v1/auth/refresh" in schema["paths"]

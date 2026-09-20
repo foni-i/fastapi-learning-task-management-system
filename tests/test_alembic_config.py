@@ -27,6 +27,7 @@ from app.models import (
     KnowledgeDocument,
     KnowledgeDocumentChunk,
     Project,
+    RefreshToken,
     Task,
     User,
 )
@@ -46,6 +47,7 @@ AGENT_TOOL_EXECUTION_REVISION = "8b7d4e2f1a90"
 AGENT_TOOL_NAME_REVISION = "c4d8a1f6e205"
 KNOWLEDGE_DOCUMENT_REVISION = "d7a1e4c9b320"
 KNOWLEDGE_DOCUMENT_CHUNK_REVISION = "e3b7c2d9a410"
+REFRESH_TOKEN_REVISION = "86cd95365562"
 DATABASE_PASSWORD = "test-only-password"
 VALID_DATABASE_URL = (
     f"postgresql+psycopg://test_user:{DATABASE_PASSWORD}@127.0.0.1:5432/test_database"
@@ -107,10 +109,11 @@ def test_alembic_configuration_loads_linear_product_migration_chain() -> None:
     assert Path(script_directory.dir).resolve() == ALEMBIC_DIRECTORY.resolve()
     assert ALEMBIC_VERSIONS_DIRECTORY.is_dir()
     revisions = list(script_directory.walk_revisions())
-    assert len(list(ALEMBIC_VERSIONS_DIRECTORY.glob("*.py"))) == 10
-    assert script_directory.get_heads() == [KNOWLEDGE_DOCUMENT_CHUNK_REVISION]
-    assert len(revisions) == 10
+    assert len(list(ALEMBIC_VERSIONS_DIRECTORY.glob("*.py"))) == 11
+    assert script_directory.get_heads() == [REFRESH_TOKEN_REVISION]
+    assert len(revisions) == 11
     expected_chain = (
+        (REFRESH_TOKEN_REVISION, KNOWLEDGE_DOCUMENT_CHUNK_REVISION),
         (KNOWLEDGE_DOCUMENT_CHUNK_REVISION, KNOWLEDGE_DOCUMENT_REVISION),
         (KNOWLEDGE_DOCUMENT_REVISION, AGENT_TOOL_NAME_REVISION),
         (AGENT_TOOL_NAME_REVISION, AGENT_TOOL_EXECUTION_REVISION),
@@ -168,6 +171,7 @@ def test_offline_environment_uses_settings_and_base_metadata(
     assert captured_configuration["target_metadata"] is AgentToolExecution.metadata
     assert captured_configuration["target_metadata"] is KnowledgeDocument.metadata
     assert captured_configuration["target_metadata"] is KnowledgeDocumentChunk.metadata
+    assert captured_configuration["target_metadata"] is RefreshToken.metadata
     assert set(Base.metadata.tables) == {
         "users",
         "projects",
@@ -178,6 +182,7 @@ def test_offline_environment_uses_settings_and_base_metadata(
         "agent_tool_executions",
         "knowledge_documents",
         "knowledge_document_chunks",
+        "refresh_tokens",
     }
 
 

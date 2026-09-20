@@ -2,6 +2,9 @@
 
 DUPLICATE_EMAIL_MESSAGE = "An account with this email already exists"
 INVALID_CREDENTIALS_MESSAGE = "Invalid email or password"
+REFRESH_TOKEN_ISSUANCE_MESSAGE = "Refresh token issuance is temporarily unavailable"
+REFRESH_TOKEN_ROTATION_MESSAGE = "Refresh token rotation is temporarily unavailable"
+AUTHENTICATION_UNAVAILABLE_MESSAGE = "Authentication is temporarily unavailable"
 AUTHENTICATION_REQUIRED_MESSAGE = "Could not validate credentials"
 PROJECT_NOT_FOUND_MESSAGE = "Project does not exist"
 TASK_NOT_FOUND_MESSAGE = "Task does not exist"
@@ -26,6 +29,22 @@ class DuplicateEmailError(Exception):
 
 class InvalidCredentialsError(Exception):
     """Signal authentication failure without revealing which credential failed."""
+
+
+class RefreshTokenIssuanceError(Exception):
+    """Hide credentials and persistence diagnostics from issuance callers."""
+
+
+class InvalidRefreshTokenError(Exception):
+    """Reject invalid credentials without distinguishing their stored state."""
+
+
+class AuthenticationUnavailableError(Exception):
+    """Hide signing and persistence failures in token-pair use cases."""
+
+
+class RefreshTokenRotationError(Exception):
+    """Hide storage and generation failures during an atomic rotation."""
 
 
 class ProjectNotFoundError(Exception):

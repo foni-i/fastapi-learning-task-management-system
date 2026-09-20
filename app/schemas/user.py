@@ -1,14 +1,42 @@
 """Registration input and public user output contracts."""
 
 from datetime import UTC, datetime
+from typing import Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 
 from app.core.email_normalization import normalize_email
 from app.core.security import validate_password
 
 TIMEZONE_ERROR_MESSAGE = "Timestamp must include timezone information"
+
+
+class PasswordChangeRequest(BaseModel):
+    """Require the current secret and a policy-compliant distinct replacement."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    current_password: SecretStr = Field(min_length=1, max_length=128)
+    new_password: SecretStr = Field(min_length=12, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, value: SecretStr) -> SecretStr:
+        validate_password(value.get_secret_value())
+        return value
+
+    @model_validator(mode="after")
+    def require_changed_password(self) -> Self:
+        if self.current_password == self.new_password:
+            raise ValueError("New password must differ from current password")
+        return self
 
 
 class UserRegistrationRequest(BaseModel):

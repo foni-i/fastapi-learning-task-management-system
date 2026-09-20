@@ -1,10 +1,12 @@
 """Authentication request and access-token response contracts."""
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from app.core.email_normalization import normalize_email
+from app.core.refresh_tokens import REFRESH_TOKEN_PATTERN
 
 LOGIN_PASSWORD_ERROR_MESSAGE = "Password must contain between 1 and 128 characters"
 
@@ -50,3 +52,37 @@ class AuthenticationErrorResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     detail: str
+
+
+class RefreshTokenRequest(BaseModel):
+    """Accept exactly one opaque credential, never a caller-chosen identity."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    refresh_token: SecretStr = Field(min_length=43, max_length=43)
+
+    @field_validator("refresh_token")
+    @classmethod
+    def validate_token(cls, value: SecretStr) -> SecretStr:
+        if REFRESH_TOKEN_PATTERN.fullmatch(value.get_secret_value()) is None:
+            raise ValueError("Invalid refresh token format")
+        return value
+
+
+class TokenPairResponse(AccessTokenResponse):
+    """Explicit credential delivery only; ordinary repr hides both tokens."""
+
+    refresh_token: str = Field(repr=False, min_length=43, max_length=43)
+    refresh_expires_at: datetime
+
+
+class AuthenticationValidationIssue(BaseModel):
+    """Only server-selected locations and fixed messages cross this boundary."""
+
+    loc: list[str]
+    type: Literal["invalid_request"] = "invalid_request"
+    msg: Literal["Invalid authentication request"] = "Invalid authentication request"
+
+
+class AuthenticationValidationResponse(BaseModel):
+    detail: list[AuthenticationValidationIssue]

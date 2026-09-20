@@ -2,22 +2,57 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
-from app.core.exceptions import DUPLICATE_EMAIL_MESSAGE, DuplicateEmailError
+from app.api.v1.endpoints.auth import CredentialRoute
+from app.core.exceptions import (
+    AUTHENTICATION_REQUIRED_MESSAGE,
+    DUPLICATE_EMAIL_MESSAGE,
+    DuplicateEmailError,
+    InvalidCredentialsError,
+)
 from app.db.session import get_session
 from app.models.user import User
-from app.schemas.auth import AuthenticationErrorResponse
+from app.schemas.auth import (
+    AuthenticationErrorResponse,
+    AuthenticationValidationResponse,
+)
 from app.schemas.user import (
     CurrentUserEmailUpdate,
+    PasswordChangeRequest,
     PublicUser,
     RegistrationConflictResponse,
 )
 from app.services.current_user import update_current_user_email
+from app.services.password_change import change_password
 
-router = APIRouter(prefix="/users", tags=["users"])
+router = APIRouter(prefix="/users", tags=["users"], route_class=CredentialRoute)
+
+
+@router.post(
+    "/me/change-password",
+    status_code=204,
+    response_class=Response,
+    responses={
+        401: {"model": AuthenticationErrorResponse},
+        422: {"model": AuthenticationValidationResponse},
+        503: {"model": AuthenticationErrorResponse},
+    },
+)
+def change_password_endpoint(
+    credentials: PasswordChangeRequest,
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Response:
+    try:
+        change_password(credentials, current_user.id, session)
+    except InvalidCredentialsError:
+        raise HTTPException(
+            401, AUTHENTICATION_REQUIRED_MESSAGE, headers={"WWW-Authenticate": "Bearer"}
+        ) from None
+    return Response(status_code=204)
 
 
 @router.get(

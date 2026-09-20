@@ -26,6 +26,7 @@ def test_user_remains_registered_in_shared_product_metadata() -> None:
         "agent_tool_executions",
         "knowledge_documents",
         "knowledge_document_chunks",
+        "refresh_tokens",
     }
     assert set(User.__table__.columns.keys()) == EXPECTED_COLUMNS
 

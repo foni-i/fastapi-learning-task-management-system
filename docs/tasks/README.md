@@ -1,6 +1,6 @@
-# Stage 12 task plan and checkpoint remediation
+# 工程任务索引：Stage 12、checkpoint remediation 与认证加固
 
-## 当前 Stage 目标
+## 已完成的 Stage 12 目标
 
 Stage 12 将已经通过功能、安全、迁移和离线评估验收的 StudyFlow Agent
 整理成可复现启动、可持续验证、可演示的工程成果。它不增加新的
@@ -69,7 +69,7 @@ POST 与数据库 schema 不变。
 
 不得自行 commit、push，或开始 MCP、多 Agent、Version 2 与其他后续实现。
 
-## 下一项工程任务
+## 独立安全加固
 
 | Task | 状态 | 前置依赖 | 一句话可见成果 |
 | --- | --- | --- | --- |
@@ -77,3 +77,37 @@ POST 与数据库 schema 不变。
 
 该 Task 已按 owner 确认的 endpoint、公开字段和 65,536-byte fail-closed 边界完成并通过
 真实 PostgreSQL integration；完成不授权开始 MCP、多 Agent、Version 2 或生产部署。
+
+## 当前工程任务
+
+恢复 [roadmap Stage 5](../roadmap.md#stage-5--deferred-authentication-hardening)
+延期保留的认证加固路线，逐项实施和验收。
+
+| Task | 状态 | 前置依赖 | 一句话可见成果 |
+| --- | --- | --- | --- |
+| [Task 5.1 — Refresh Token 模型与迁移](stage-5-1-refresh-token-model.md) | Completed / owner 已验收 | Owner 已确认契约；现有认证基线及完整迁移链 | 6 字段私有表、具名约束及用户索引已实现；真实 PostgreSQL 迁移往返和全套 integration 通过。 |
+| [Task 5.2 — Refresh Token 内部签发](stage-5-2-refresh-token-issuance.md) | Completed / 验收后 owner 授权继续 | Task 5.1 已验收，owner 授权继续 | 安全随机令牌、摘要入库、提交后交付与事务失败回滚；完整 integration 97 passed。 |
+| [Task 5.3 — 原子轮换与重用拒绝](stage-5-3-refresh-token-rotation.md) | Completed / owner 验收后继续 | Task 5.2 验收后继续 | 原子轮换与重放拒绝；新增 PostgreSQL 11 passed、完整 integration 108 passed。 |
+| [Task 5.4 — Refresh HTTP 与双令牌交付](stage-5-4-refresh-http.md) | Completed / owner 验收后继续 | Task 5.3 已验收，owner 已确认 JSON 契约 | 定向离线 97、完整离线 1017、新增 PostgreSQL HTTP 11、完整 integration 119 项均通过。 |
+| [Task 5.5 — Logout 单凭据吊销](stage-5-5-logout.md) | Completed / owner 验收后继续 | Task 5.4 验收后 owner 授权继续 | 幂等退出只吊销所提交的刷新凭据；新增离线 28、真实退出 HTTP 10、完整 integration 129 项通过。 |
+| [Task 5.6 — 密码修改与全部刷新凭据吊销](stage-5-6-password-change.md) | Completed / owner 验收后继续 | Task 5.5 验收后 owner 授权继续 | 单事务改密及全部刷新吊销；定向 PostgreSQL 56、完整 integration 149、离线 1078 与全部质量门通过。 |
+| [Task 5.7 — 认证安全集成与文档收尾](stage-5-7-auth-security-acceptance.md) | Completed / owner 已验收 | Task 5.6 已验收 | 新增安全验收 13、完整 integration 162、离线 1078 项通过，质量门及迁移复查通过。 |
+| [Stage 5 checkpoint 提交准备](stage-5-checkpoint-preparation.md) | Prepared / 等待 owner 确认 | Task 5.1～5.7 已验收 | 52 项候选清单，integration 162、离线 1078 与质量门通过；暂存区为空，未 commit/push。 |
+
+2026-09-17 Task 5.1 已按确认契约实现，新 head 为 `86cd95365562`；定向离线 41 passed、
+新增 PostgreSQL 21 passed、全套 integration 93 passed、完整离线 944 passed；最终质量门
+通过。详细结果见任务文档与 roadmap。Owner 已验收 Task 5.1；Task 5.2 已实现并通过
+19 项定向离线测试、4 项新增真实事务测试、97 项全套 integration、963 项完整离线测试
+和全部质量门，验收后 owner 授权继续，未 commit/push。
+Task 5.3 已补齐真实并发/回滚验证：定向离线 38 passed、完整离线 982 passed，质量门通过。
+Docker 恢复可用后，以进程级测试端口 55433 避开 Windows 保留端口；测试容器已恢复停止。
+Owner 在 Task 5.3 验收报告后授权继续，未 commit/push。
+Task 5.4 的 JSON body 契约已实现；用户重启 Docker 后真实数据库验证与全部质量门通过。
+仅启动测试库并恢复停止，唯一 head `86cd95365562`、无漂移；owner 在报告后授权继续。
+Task 5.5 已实现并通过验证，完整离线 1045 passed、质量门通过，owner 在报告后授权继续；
+Task 5.6 已实现；2026-09-19 owner 重启 Docker 后补齐真实验证，完整 integration 149
+passed、迁移无漂移、离线质量门通过。仅操作 postgres-test 并恢复停止，owner 已确认继续。
+Task 5.7 已完成本地安全集成与证据整理，未修改应用代码；仅操作 postgres-test 并恢复
+停止。Owner 随后验收并明确授权 Stage 5 checkpoint 提交准备；该授权不包含实际提交、
+推送或任何新功能。历史任务结果保留，当前提交准备证据由独立记录承载。
+当前登录交付双令牌，refresh 仅接受 JSON body。未 commit/push 或运行本次改动的远程 CI。
